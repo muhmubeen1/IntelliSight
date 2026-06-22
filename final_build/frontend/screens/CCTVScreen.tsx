@@ -171,6 +171,23 @@ export default function CCTVScreen() {
         });
     }
   }, [isStreaming, streamUrl]);
+  const waitForPlaylist = async (url: string, retries = 20, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch(`${url}?check=${Date.now()}`, {
+          method: "GET",
+        });
+
+        if (response.ok) {
+          return true;
+        }
+      } catch (err) { }
+
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+
+    return false;
+  };
 
   const handleConnectCamera = async () => {
     try {
@@ -187,17 +204,22 @@ export default function CCTVScreen() {
       const data = await connectLiveCamera(mode, finalRtspUrl);
 
       console.log("Camera connected:", data);
+      const liveUrl = getLiveStreamUrl();
 
       setModalVisible(false);
       setIsLoading(true);
 
-      setTimeout(() => {
-        const liveUrl = `${getLiveStreamUrl()}?t=${Date.now()}`;
+      const playlistReady = await waitForPlaylist(liveUrl);
 
-        setStreamUrl(liveUrl);
-        setIsStreaming(true);
-        setIsLoading(false);
-      }, 12000);
+      if (!playlistReady) {
+        setIsStreaming(false);
+        setError("NO SIGNAL: HLS playlist was not generated.");
+        return;
+      }
+
+      setStreamUrl(`${liveUrl}?t=${Date.now()}`);
+      setIsStreaming(true);
+      setError(null);
     } catch (error: any) {
       setIsStreaming(false);
       setError(error?.toString() || "Failed to connect camera.");
