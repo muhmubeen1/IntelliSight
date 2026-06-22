@@ -1,5 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { AVPlaybackStatus, ResizeMode, Video } from "expo-av";
+import Hls from "hls.js";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -58,6 +59,7 @@ export default function CCTVScreen() {
   } | null>(null);
 
   const videoRef = useRef<Video>(null);
+  const webVideoRef = useRef<HTMLVideoElement | null>(null);
   const pulseAnim = useSharedValue(1);
 
   useEffect(() => {
@@ -103,6 +105,63 @@ export default function CCTVScreen() {
     checkStatus();
   }, []);
 
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    if (!isStreaming || !streamUrl || !webVideoRef.current) return;
+
+    const video = webVideoRef.current;
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        lowLatencyMode: true,
+        enableWorker: true,
+      });
+
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video
+          .play()
+          .then(() => {
+            setError(null);
+            setIsLoading(false);
+          })
+          .catch(() => {
+            setError("NO SIGNAL: Browser blocked video autoplay.");
+            setIsLoading(false);
+          });
+      });
+
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        console.log("HLS.js Error:", data);
+
+        if (data.fatal) {
+          setError("NO SIGNAL: Web HLS playback failed.");
+          setIsLoading(false);
+        }
+      });
+
+      return () => {
+        hls.destroy();
+      };
+    }
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = streamUrl;
+      video
+        .play()
+        .then(() => {
+          setError(null);
+          setIsLoading(false);
+        })
+        .catch(() => {
+          setError("NO SIGNAL: Browser blocked video autoplay.");
+          setIsLoading(false);
+        });
+    }
+  }, [isStreaming, streamUrl]);
+
   const handleConnectCamera = async () => {
     try {
       setIsLoading(true);
@@ -119,7 +178,8 @@ export default function CCTVScreen() {
 
       console.log("Camera connected:", data);
 
-      setStreamUrl(getLiveStreamUrl());
+      const liveUrl = getLiveStreamUrl();
+      setStreamUrl(liveUrl);
       setIsStreaming(true);
       setModalVisible(false);
     } catch (error: any) {
@@ -139,6 +199,12 @@ export default function CCTVScreen() {
 
       if (videoRef.current) {
         await videoRef.current.unloadAsync();
+      }
+
+      if (webVideoRef.current) {
+        webVideoRef.current.pause();
+        webVideoRef.current.removeAttribute("src");
+        webVideoRef.current.load();
       }
 
       setIsStreaming(false);
@@ -227,7 +293,23 @@ export default function CCTVScreen() {
         <View
           style={[styles.videoWrapper, isAnomaly && { borderColor: ALERT_RED }]}
         >
-          {isStreaming && (
+          {isStreaming && Platform.OS === "web" && (
+            <video
+              ref={webVideoRef}
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                backgroundColor: "#000",
+              }}
+              muted
+              autoPlay
+              playsInline
+              controls
+            />
+          )}
+
+          {isStreaming && Platform.OS !== "web" && (
             <Video
               ref={videoRef}
               style={styles.video}
