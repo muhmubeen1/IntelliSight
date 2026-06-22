@@ -3,6 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
 const API_URL = 'http://192.168.100.12:5000';
+const LIVE_SERVER_URL = 'http://192.168.100.12:4000';
 
 const api = axios.create({
     baseURL: `${API_URL}/api`,
@@ -109,6 +110,58 @@ export const getLiveClassification = async () => {
     } catch (error) {
         throw error.response?.data || 'Failed to fetch live classification';
     }
+};
+
+// ==========================
+// LIVE CCTV STREAM APIs
+// Node.js Live Server APIs
+// ==========================
+
+export const connectLiveCamera = async (rtspUrl) => {
+    try {
+        const response = await axios.post(`${LIVE_SERVER_URL}/connect`, {
+            mode: 'rtsp',
+            rtspUrl,
+        });
+
+        return response.data;
+    } catch (error) {
+        throw (
+            error.response?.data?.message ||
+            error.response?.data?.error ||
+            'Failed to connect live camera'
+        );
+    }
+};
+
+export const disconnectLiveCamera = async () => {
+    try {
+        const response = await axios.post(`${LIVE_SERVER_URL}/disconnect`);
+        return response.data;
+    } catch (error) {
+        throw (
+            error.response?.data?.message ||
+            error.response?.data?.error ||
+            'Failed to disconnect live camera'
+        );
+    }
+};
+
+export const getLiveStreamStatus = async () => {
+    try {
+        const response = await axios.get(`${LIVE_SERVER_URL}/status`);
+        return response.data;
+    } catch (error) {
+        throw (
+            error.response?.data?.message ||
+            error.response?.data?.error ||
+            'Failed to fetch live stream status'
+        );
+    }
+};
+
+export const getLiveStreamUrl = () => {
+    return `${LIVE_SERVER_URL}/videos/ipcam/index.m3u8`;
 };
 
 export default api;
