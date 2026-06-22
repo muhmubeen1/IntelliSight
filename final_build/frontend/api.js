@@ -117,15 +117,17 @@ export const getLiveClassification = async () => {
 // Node.js Live Server APIs
 // ==========================
 
-export const connectLiveCamera = async (rtspUrl) => {
+export const connectLiveCamera = async (mode = 'local', rtspUrl = '') => {
     try {
         const response = await axios.post(`${LIVE_SERVER_URL}/connect`, {
-            mode: 'rtsp',
+            mode,
             rtspUrl,
         });
 
         return response.data;
     } catch (error) {
+        console.log('Connect Camera Error:', error);
+
         throw (
             error.response?.data?.message ||
             error.response?.data?.error ||
@@ -139,6 +141,8 @@ export const disconnectLiveCamera = async () => {
         const response = await axios.post(`${LIVE_SERVER_URL}/disconnect`);
         return response.data;
     } catch (error) {
+        console.log('Disconnect Camera Error:', error);
+
         throw (
             error.response?.data?.message ||
             error.response?.data?.error ||
@@ -152,6 +156,8 @@ export const getLiveStreamStatus = async () => {
         const response = await axios.get(`${LIVE_SERVER_URL}/status`);
         return response.data;
     } catch (error) {
+        console.log('Live Stream Status Error:', error);
+
         throw (
             error.response?.data?.message ||
             error.response?.data?.error ||
@@ -161,7 +167,7 @@ export const getLiveStreamStatus = async () => {
 };
 
 export const getLiveStreamUrl = () => {
-    return `${LIVE_SERVER_URL}/videos/ipcam/index.m3u8`;
+    return `${LIVE_SERVER_URL}/index.m3u8`;
 };
 
 export default api;
