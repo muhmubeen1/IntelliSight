@@ -137,6 +137,16 @@ export default function CCTVScreen() {
         console.log("HLS.js Error:", data);
 
         if (data.fatal) {
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            hls.startLoad();
+            return;
+          }
+
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError();
+            return;
+          }
+
           setError("NO SIGNAL: Web HLS playback failed.");
           setIsLoading(false);
         }
@@ -178,10 +188,15 @@ export default function CCTVScreen() {
 
       console.log("Camera connected:", data);
 
-      const liveUrl = getLiveStreamUrl();
-      setStreamUrl(liveUrl);
-      setIsStreaming(true);
+      const liveUrl = `${getLiveStreamUrl()}?t=${Date.now()}`;
+
       setModalVisible(false);
+      setIsLoading(true);
+
+      setTimeout(() => {
+        setStreamUrl(liveUrl);
+        setIsStreaming(true);
+      }, 3000);
     } catch (error: any) {
       setIsStreaming(false);
       setError(error?.toString() || "Failed to connect camera.");
