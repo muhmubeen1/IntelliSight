@@ -94,6 +94,7 @@ export default function CCTVScreen() {
 
       setError(null);
     } catch (err) {
+      setIsStreaming(false);
       setError("Live server not reachable.");
     }
   };
@@ -112,9 +113,9 @@ export default function CCTVScreen() {
         return;
       }
 
-      const finalRtspUrl = rtspUrl.trim();
+      const finalRtspUrl = mode === "rtsp" ? rtspUrl.trim() : "";
 
-      const data = await connectLiveCamera(finalRtspUrl);
+      const data = await connectLiveCamera(mode, finalRtspUrl);
 
       console.log("Camera connected:", data);
 
