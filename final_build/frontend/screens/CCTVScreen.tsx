@@ -188,15 +188,16 @@ export default function CCTVScreen() {
 
       console.log("Camera connected:", data);
 
-      const liveUrl = `${getLiveStreamUrl()}?t=${Date.now()}`;
-
       setModalVisible(false);
       setIsLoading(true);
 
       setTimeout(() => {
+        const liveUrl = `${getLiveStreamUrl()}?t=${Date.now()}`;
+
         setStreamUrl(liveUrl);
         setIsStreaming(true);
-      }, 3000);
+        setIsLoading(false);
+      }, 12000);
     } catch (error: any) {
       setIsStreaming(false);
       setError(error?.toString() || "Failed to connect camera.");
