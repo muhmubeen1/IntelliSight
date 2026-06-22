@@ -167,7 +167,7 @@ export const getLiveStreamStatus = async () => {
 };
 
 export const getLiveStreamUrl = () => {
-    return `${LIVE_SERVER_URL}/index.m3u8`;
+    return `${LIVE_SERVER_URL}/videos/ipcam/index.m3u8`;
 };
 
 export default api;
