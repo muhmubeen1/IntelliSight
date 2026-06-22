@@ -3,7 +3,6 @@ import { AVPlaybackStatus, ResizeMode, Video } from "expo-av";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Modal,
   Platform,
   ScrollView,
@@ -11,7 +10,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View
+  View,
 } from "react-native";
 import Animated, {
   Easing,
@@ -21,10 +20,16 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
+import {
+  connectLiveCamera,
+  disconnectLiveCamera,
+  getLiveStreamStatus,
+  getLiveStreamUrl,
+} from "../api";
+
 import { CAMERAS } from "../config/streams";
 
-const API_URL = "http://192.168.100.55:5000";
-const LIVE_SERVER_URL = "http://192.168.100.12:4000";
+const API_URL = "http://192.168.100.12:5000";
 
 const NEON_GREEN = "#10B952";
 const DARK_BG = "#050705";
@@ -39,7 +44,7 @@ export default function CCTVScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const [isStreaming, setIsStreaming] = useState(false);
-  const [streamUrl, setStreamUrl] = useState(`${LIVE_SERVER_URL}/index.m3u8`);
+  const [streamUrl, setStreamUrl] = useState(getLiveStreamUrl());
 
   const [modalVisible, setModalVisible] = useState(false);
   const [cameraName, setCameraName] = useState("Main Entrance Camera");
@@ -76,12 +81,18 @@ export default function CCTVScreen() {
 
   const checkStatus = async () => {
     try {
-      const response = await fetch(`${LIVE_SERVER_URL}/status`);
-      const data = await response.json();
+      const data = await getLiveStreamStatus();
 
-      setIsStreaming(data.isStreaming);
+      setIsStreaming(data.isStreaming || false);
       setMode(data.mode || "local");
-      setStreamUrl(fixedStreamUrl(data.streamUrl));
+
+      if (data.streamUrl) {
+        setStreamUrl(fixedStreamUrl(data.streamUrl));
+      } else {
+        setStreamUrl(getLiveStreamUrl());
+      }
+
+      setError(null);
     } catch (err) {
       setError("Live server not reachable.");
     }
@@ -91,63 +102,28 @@ export default function CCTVScreen() {
     checkStatus();
   }, []);
 
-  const connectCamera = async () => {
-    if (mode === "rtsp" && !rtspUrl.trim()) {
-      Alert.alert("Missing RTSP URL", "Please enter camera RTSP URL.");
-      return;
-    }
-
+  const handleConnectCamera = async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      const response = await fetch(`${LIVE_SERVER_URL}/connect`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          mode,
-          rtspUrl,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(data.message || "Camera connection failed.");
-        Alert.alert("Connection Failed", data.message || "Unable to connect.");
+      if (mode === "rtsp" && !rtspUrl.trim()) {
+        setError("Please enter RTSP URL.");
         return;
       }
 
-      const url = fixedStreamUrl(data.streamUrl);
+      const finalRtspUrl = rtspUrl.trim();
 
-      setStreamUrl(url);
+      const data = await connectLiveCamera(finalRtspUrl);
+
+      console.log("Camera connected:", data);
+
+      setStreamUrl(getLiveStreamUrl());
       setIsStreaming(true);
       setModalVisible(false);
-      setSelectedCamera(1);
-
-      setTimeout(async () => {
-        try {
-          if (videoRef.current) {
-            await videoRef.current.unloadAsync();
-            await videoRef.current.loadAsync(
-              {
-                uri: url,
-                overrideFileExtensionAndroid: "m3u8",
-              },
-              {},
-              false
-            );
-            await videoRef.current.playAsync();
-          }
-        } catch (err) {
-          setError("Failed to load live stream.");
-        }
-      }, 1200);
-    } catch (err: any) {
-      setError("Live server connection failed.");
-      Alert.alert("Error", err.message || "Something went wrong.");
+    } catch (error: any) {
+      setIsStreaming(false);
+      setError(error?.toString() || "Failed to connect camera.");
     } finally {
       setIsLoading(false);
     }
@@ -156,19 +132,19 @@ export default function CCTVScreen() {
   const disconnectCamera = async () => {
     try {
       setIsLoading(true);
+      setError(null);
 
-      await fetch(`${LIVE_SERVER_URL}/disconnect`, {
-        method: "POST",
-      });
+      await disconnectLiveCamera();
 
       if (videoRef.current) {
         await videoRef.current.unloadAsync();
       }
 
       setIsStreaming(false);
+      setRtspUrl("");
       setError("NO SIGNAL: Stream disconnected.");
-    } catch (err) {
-      setError("Failed to disconnect stream.");
+    } catch (error: any) {
+      setError(error?.toString() || "Failed to disconnect stream.");
     } finally {
       setIsLoading(false);
     }
@@ -207,8 +183,7 @@ export default function CCTVScreen() {
     return () => clearInterval(interval);
   }, []);
 
-  const isAnomaly =
-    classification && classification.result !== "NormalVideos";
+  const isAnomaly = classification && classification.result !== "NormalVideos";
 
   const switchCamera = (cameraId: number) => {
     const camera = CAMERAS.find((cam) => cam.id === cameraId);
@@ -242,20 +217,14 @@ export default function CCTVScreen() {
             <Text style={styles.connectCameraText}>CONNECT CAMERA</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.stopButton}
-            onPress={disconnectCamera}
-          >
+          <TouchableOpacity style={styles.stopButton} onPress={disconnectCamera}>
             <Ionicons name="stop-circle" size={20} color={ALERT_RED} />
             <Text style={styles.stopButtonText}>STOP</Text>
           </TouchableOpacity>
         </View>
 
         <View
-          style={[
-            styles.videoWrapper,
-            isAnomaly && { borderColor: ALERT_RED },
-          ]}
+          style={[styles.videoWrapper, isAnomaly && { borderColor: ALERT_RED }]}
         >
           {isStreaming && (
             <Video
@@ -314,9 +283,7 @@ export default function CCTVScreen() {
                 <Text
                   style={[
                     styles.classificationText,
-                    isAnomaly
-                      ? { color: ALERT_RED }
-                      : { color: NEON_GREEN },
+                    isAnomaly ? { color: ALERT_RED } : { color: NEON_GREEN },
                   ]}
                 >
                   {isAnomaly
@@ -507,7 +474,7 @@ export default function CCTVScreen() {
 
               <TouchableOpacity
                 style={styles.modalConnectButton}
-                onPress={connectCamera}
+                onPress={handleConnectCamera}
                 disabled={isLoading}
               >
                 {isLoading ? (
