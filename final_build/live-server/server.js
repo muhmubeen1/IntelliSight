@@ -1,12 +1,3 @@
-// ===============================
-// IntelliSight Live Streaming Server
-// Supports:
-// 1. Local demo video streaming
-// 2. RTSP IP camera streaming
-// 3. HLS output for browser/mobile app
-// 4. WebSocket updates for frontend
-// ===============================
-
 const http = require("http");
 const fs = require("fs");
 const WebSocket = require("ws");
@@ -14,36 +5,36 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const PORT = 4000;
+const PC_IP = "192.168.100.12";
 
-// Full FFmpeg path on your Windows system
+// Full path of FFmpeg installed on your system
 const FFMPEG_PATH =
     "C:\\Users\\MUBEEN\\AppData\\Local\\Microsoft\\WinGet\\Links\\ffmpeg.exe";
 
-// Folder where HLS files will be generated
+// HLS output folder
 const HLS_DIR = path.join(__dirname, "videos", "ipcam");
-
-// Main HLS playlist file
 const HLS_OUTPUT = path.join(HLS_DIR, "index.m3u8");
 
 // Local demo video path
 const LOCAL_VIDEO_PATH = path.join(__dirname, "videos", "test.mp4");
 
-// Current stream state
+// OBS Virtual Camera device name
+const OBS_CAMERA_NAME = "OBS Virtual Camera";
+
 let currentMode = "local";
-let currentRtspUrl = "";
 let ffmpegProcess = null;
 let isStreaming = false;
+let clients = new Set();
 
-// Create HLS folder if it does not exist
+// Create HLS folder if missing
 if (!fs.existsSync(HLS_DIR)) {
     fs.mkdirSync(HLS_DIR, { recursive: true });
 }
 
-// ===============================
-// Clean old HLS files
-// Deletes previous .m3u8 and .ts files
-// ===============================
-
+/*
+  Remove old .m3u8 and .ts files before starting a new stream.
+  This prevents browser/frontend from loading old HLS segments.
+*/
 function cleanHlsFolder() {
     try {
         const files = fs.readdirSync(HLS_DIR);
@@ -60,33 +51,9 @@ function cleanHlsFolder() {
     }
 }
 
-// ===============================
-// Broadcast status to all WebSocket clients
-// ===============================
-
-function broadcastStatus() {
-    const message = JSON.stringify({
-        type: "status",
-        isStreaming,
-        mode: currentMode,
-
-        // IMPORTANT:
-        // Frontend should use PC IP instead of localhost.
-        // This is still kept as localhost for server-side status.
-        streamUrl: `http://localhost:${PORT}/index.m3u8`,
-    });
-
-    clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
-    });
-}
-
-// ===============================
-// Stop FFmpeg stream
-// ===============================
-
+/*
+  Stop existing FFmpeg process before starting another stream.
+*/
 function stopFFmpeg() {
     if (ffmpegProcess) {
         console.log("Stopping existing FFmpeg process...");
@@ -97,18 +64,37 @@ function stopFFmpeg() {
     isStreaming = false;
 }
 
-// ===============================
-// Start FFmpeg stream
-// mode = local or rtsp
-// rtspUrl = camera URL if mode is rtsp
-// ===============================
+/*
+  Send current stream status to all WebSocket clients.
+*/
+function broadcastStatus() {
+    const message = JSON.stringify({
+        type: "status",
+        isStreaming,
+        mode: currentMode,
+        streamUrl: `http://${PC_IP}:${PORT}/index.m3u8`,
+    });
 
-function startFFmpeg(mode, rtspUrl) {
+    clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
+}
+
+/*
+  Main FFmpeg starter.
+
+  Supported modes:
+  1. local  -> videos/test.mp4
+  2. obs    -> OBS Virtual Camera
+  3. rtsp   -> RTSP stream if needed later
+*/
+function startFFmpeg(mode, cameraUrl = "") {
     stopFFmpeg();
     cleanHlsFolder();
 
     currentMode = mode;
-    currentRtspUrl = rtspUrl || "";
 
     let inputArgs = [];
 
@@ -124,71 +110,85 @@ function startFFmpeg(mode, rtspUrl) {
             "-i",
             LOCAL_VIDEO_PATH,
         ];
-    } else if (mode === "rtsp") {
-        if (!rtspUrl) {
-            throw new Error("Camera URL is required");
+    } else if (mode === "obs" || mode === "rtsp") {
+        /*
+          IMPORTANT:
+          For OBS Virtual Camera, do NOT add streamUrl after this.
+          Your old code had extra streamUrl values, which broke FFmpeg.
+        */
+        inputArgs = [
+            "-f",
+            "dshow",
+            "-rtbufsize",
+            "100M",
+            "-i",
+            `video=${OBS_CAMERA_NAME}`,
+        ];
+    } else if (mode === "direct-rtsp") {
+        if (!cameraUrl) {
+            throw new Error("RTSP URL is empty.");
         }
 
-        // Support both RTSP cameras and IP Webcam HTTP streams
-        if (rtspUrl.startsWith("rtsp://")) {
-            inputArgs = [
-                "-rtsp_transport",
-                "tcp",
-                "-i",
-                rtspUrl,
-            ];
-        } else {
-            console.log("Using HTTP/MJPEG camera stream");
-
-            inputArgs = [
-                "-f",
-                "mjpeg",
-                "-i",
-                rtspUrl,
-            ];
-        }
+        inputArgs = [
+            "-rtsp_transport",
+            "tcp",
+            "-i",
+            cameraUrl,
+        ];
     } else {
-        throw new Error("Invalid mode. Use local or rtsp");
+        throw new Error("Invalid mode. Use local, obs, rtsp, or direct-rtsp.");
     }
 
     const ffmpegArgs = [
+        "-loglevel",
+        "verbose",
+
         ...inputArgs,
 
+        // Disable audio
+        "-an",
+
+        // Encode video for HLS
         "-c:v",
         "libx264",
-
         "-preset",
-        "veryfast",
-
+        "ultrafast",
         "-tune",
         "zerolatency",
 
+        // HLS output settings
         "-f",
         "hls",
-
         "-hls_time",
-        "2",
-
+        "1",
         "-hls_list_size",
         "5",
-
         "-hls_flags",
-        "delete_segments",
+        "delete_segments+append_list",
+
+        // Force segment naming
+        "-hls_segment_filename",
+        path.join(HLS_DIR, "index%d.ts"),
 
         HLS_OUTPUT,
     ];
 
     console.log("Starting FFmpeg in mode:", mode);
+    console.log("FFmpeg Command:", FFMPEG_PATH, ffmpegArgs.join(" "));
 
-    ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs);
+    ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs, {
+        windowsHide: true,
+    });
+
     isStreaming = true;
+    broadcastStatus();
 
     ffmpegProcess.stderr.on("data", (data) => {
-        console.log(`FFmpeg: ${data}`);
+        console.log(`FFmpeg: ${data.toString()}`);
     });
 
     ffmpegProcess.on("error", (err) => {
-        console.error("FFmpeg error:", err.message);
+        console.error("FFmpeg spawn error:", err.message);
         isStreaming = false;
         broadcastStatus();
     });
@@ -198,14 +198,11 @@ function startFFmpeg(mode, rtspUrl) {
         isStreaming = false;
         broadcastStatus();
     });
-
-    broadcastStatus();
 }
 
-// ===============================
-// Send JSON response
-// ===============================
-
+/*
+  JSON response helper
+*/
 function sendJson(response, statusCode, data) {
     response.writeHead(statusCode, {
         "Content-Type": "application/json",
@@ -217,10 +214,9 @@ function sendJson(response, statusCode, data) {
     response.end(JSON.stringify(data));
 }
 
-// ===============================
-// Parse JSON body from POST request
-// ===============================
-
+/*
+  Read POST JSON body
+*/
 function parseBody(request) {
     return new Promise((resolve, reject) => {
         let body = "";
@@ -239,18 +235,9 @@ function parseBody(request) {
     });
 }
 
-// ===============================
-// HTTP Server
-// Handles:
-// GET /
-// GET /status
-// POST /connect
-// POST /disconnect
-// GET /index.m3u8
-// GET /.ts files
-// ===============================
-
 const server = http.createServer(async (request, response) => {
+    console.log("REQUEST:", request.method, request.url);
+
     const headers = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "OPTIONS, POST, GET",
@@ -258,20 +245,6 @@ const server = http.createServer(async (request, response) => {
         "Access-Control-Max-Age": 2592000,
     };
 
-    // ===============================
-    // IMPORTANT FIX:
-    // request.url may contain query params:
-    // /index.m3u8?t=123
-    // /index.m3u8?check=123
-    //
-    // If we use request.url directly, Node tries to find:
-    // index.m3u8?t=123
-    //
-    // That file does not exist, so server returns 404.
-    //
-    // pathname removes query params and gives only:
-    // /index.m3u8
-    // ===============================
     const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
     const pathname = parsedUrl.pathname;
 
@@ -286,7 +259,6 @@ const server = http.createServer(async (request, response) => {
             "Content-Type": "text/plain",
             "Access-Control-Allow-Origin": "*",
         });
-
         response.end("IntelliSight Live Server Running");
         return;
     }
@@ -295,30 +267,48 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, 200, {
             isStreaming,
             mode: currentMode,
-            streamUrl: `http://localhost:${PORT}/index.m3u8`,
+            streamUrl: `http://${PC_IP}:${PORT}/index.m3u8`,
         });
-
         return;
     }
 
+    /*
+      Connect stream.
+  
+      For OBS workflow, frontend can send:
+      {
+        "mode": "obs"
+      }
+  
+      Even if frontend sends rtsp mode, this code currently uses OBS camera
+      for rtsp mode also, because we are now testing OBS Virtual Camera.
+    */
     if (pathname === "/connect" && request.method === "POST") {
         try {
             const body = await parseBody(request);
+            console.log("CONNECT BODY:", body);
 
-            const mode = body.mode || "local";
-            const rtspUrl = body.rtspUrl || "";
+            const mode = body.mode || "obs";
+            const cameraUrl =
+                body.rtspUrl ||
+                body.cameraUrl ||
+                body.cameraIp ||
+                body.ipAddress ||
+                body.ip ||
+                body.url ||
+                body.streamUrl ||
+                "";
 
-            startFFmpeg(mode, rtspUrl);
+            startFFmpeg(mode, cameraUrl);
 
             sendJson(response, 200, {
                 message: "Stream started successfully",
                 mode,
-                streamUrl: `http://localhost:${PORT}/index.m3u8`,
+                streamUrl: `http://${PC_IP}:${PORT}/index.m3u8`,
             });
         } catch (err) {
-            sendJson(response, 400, {
-                message: err.message,
-            });
+            console.log("CONNECT ERROR:", err.message);
+            sendJson(response, 400, { message: err.message });
         }
 
         return;
@@ -336,26 +326,21 @@ const server = http.createServer(async (request, response) => {
         return;
     }
 
+    /*
+      Serve HLS files:
+      /index.m3u8
+      /index0.ts
+      /index1.ts
+      etc.
+    */
     if (pathname.endsWith(".m3u8")) {
         headers["Content-Type"] = "application/vnd.apple.mpegurl";
+        headers["Cache-Control"] = "no-store";
     } else if (pathname.endsWith(".ts")) {
         headers["Content-Type"] = "video/MP2T";
+        headers["Cache-Control"] = "no-store";
     }
 
-    // ===============================
-    // Serve HLS files from:
-    // live-server/videos/ipcam
-    //
-    // Browser requests:
-    // /index.m3u8
-    // /index0.ts
-    //
-    // We remove the first slash so:
-    // /index.m3u8 -> index.m3u8
-    //
-    // Final file path becomes:
-    // live-server/videos/ipcam/index.m3u8
-    // ===============================
     const requestedFile = pathname.replace(/^\/+/, "");
     const filePath = path.join(HLS_DIR, requestedFile);
 
@@ -371,25 +356,21 @@ const server = http.createServer(async (request, response) => {
     });
 });
 
-// ===============================
-// WebSocket Server
-// Sends status and segment updates to frontend
-// ===============================
-
 const wss = new WebSocket.Server({ server });
-const clients = new Set();
 
 wss.on("connection", (ws) => {
     console.log("New WebSocket client connected");
 
     clients.add(ws);
 
-    ws.send(JSON.stringify({
-        type: "status",
-        isStreaming,
-        mode: currentMode,
-        streamUrl: `http://localhost:${PORT}/index.m3u8`,
-    }));
+    ws.send(
+        JSON.stringify({
+            type: "status",
+            isStreaming,
+            mode: currentMode,
+            streamUrl: `http://${PC_IP}:${PORT}/index.m3u8`,
+        })
+    );
 
     ws.on("close", () => {
         console.log("WebSocket client disconnected");
@@ -397,17 +378,15 @@ wss.on("connection", (ws) => {
     });
 });
 
-// ===============================
-// Watch HLS folder for new .ts segments
-// Sends update to frontend whenever new segment is created
-// ===============================
-
+/*
+  Notify frontend when new HLS segments are created.
+*/
 fs.watch(HLS_DIR, (eventType, filename) => {
     if (filename && filename.endsWith(".ts")) {
         const message = JSON.stringify({
             type: "segment",
             segment: filename,
-            streamUrl: `http://localhost:${PORT}/index.m3u8`,
+            streamUrl: `http://${PC_IP}:${PORT}/index.m3u8`,
         });
 
         clients.forEach((client) => {
@@ -418,14 +397,10 @@ fs.watch(HLS_DIR, (eventType, filename) => {
     }
 });
 
-// ===============================
-// Start server
-// ===============================
-
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
     console.log(`IntelliSight Live Server running on PORT ${PORT}`);
-    console.log(`Health: http://localhost:${PORT}/`);
-    console.log(`Status: http://localhost:${PORT}/status`);
-    console.log(`Stream: http://localhost:${PORT}/index.m3u8`);
-    console.log(`WebSocket: ws://localhost:${PORT}`);
+    console.log(`Health: http://${PC_IP}:${PORT}/`);
+    console.log(`Status: http://${PC_IP}:${PORT}/status`);
+    console.log(`Stream: http://${PC_IP}:${PORT}/index.m3u8`);
+    console.log(`WebSocket: ws://${PC_IP}:${PORT}`);
 });
