@@ -32,7 +32,7 @@ const DARK_BG = "#050705";
 const MUTED_GREEN = "#8A9A8D";
 const ALERT_RED = "#ff3333";
 
-type StreamMode = "local" | "rtsp";
+type StreamMode = "local" | "obs";
 
 export default function CCTVScreen() {
   const [selectedCamera, setSelectedCamera] = useState(1);
@@ -45,7 +45,6 @@ export default function CCTVScreen() {
   const [modalVisible, setModalVisible] = useState(false);
   const [cameraName, setCameraName] = useState("Main Entrance Camera");
   const [mode, setMode] = useState<StreamMode>("local");
-  const [rtspUrl, setRtspUrl] = useState("");
 
   const [classification, setClassification] = useState<{
     result: string;
@@ -77,7 +76,7 @@ export default function CCTVScreen() {
       const data = await getLiveStreamStatus();
 
       setIsStreaming(data.isStreaming || false);
-      setMode(data.mode || "local");
+      setMode(data.mode === "obs" ? "obs" : "local");
 
       if (data.streamUrl) {
         setStreamUrl(data.streamUrl.replace("localhost", "192.168.100.12"));
@@ -184,13 +183,7 @@ export default function CCTVScreen() {
       setIsLoading(true);
       setError(null);
 
-      if (mode === "rtsp" && !rtspUrl.trim()) {
-        setError("Please enter camera IP or RTSP URL.");
-        setIsLoading(false);
-        return;
-      }
-
-      const finalRtspUrl = mode === "rtsp" ? rtspUrl.trim() : "";
+      const selectedMode = mode === "obs" ? "obs" : "local";
 
       console.log("Sending connect request...");
 
@@ -200,8 +193,7 @@ export default function CCTVScreen() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          mode,
-          rtspUrl: finalRtspUrl,
+          mode: selectedMode,
         }),
       });
 
@@ -256,7 +248,6 @@ export default function CCTVScreen() {
       }
 
       setIsStreaming(false);
-      setRtspUrl("");
       setError("NO SIGNAL: Stream disconnected.");
     } catch (error: any) {
       setError(error?.toString() || "Failed to disconnect stream.");
@@ -486,6 +477,7 @@ export default function CCTVScreen() {
             />
 
             <Text style={styles.inputLabel}>SOURCE TYPE</Text>
+
             <View style={styles.modeRow}>
               <TouchableOpacity
                 style={[styles.modeButton, mode === "local" && styles.activeModeButton]}
@@ -498,30 +490,15 @@ export default function CCTVScreen() {
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.modeButton, mode === "rtsp" && styles.activeModeButton]}
-                onPress={() => setMode("rtsp")}
+                style={[styles.modeButton, mode === "obs" && styles.activeModeButton]}
+                onPress={() => setMode("obs")}
               >
-                <Ionicons name="camera" size={20} color={mode === "rtsp" ? "#000" : NEON_GREEN} />
-                <Text style={[styles.modeText, mode === "rtsp" && styles.activeModeText]}>
-                  IP CAMERA
+                <Ionicons name="camera" size={20} color={mode === "obs" ? "#000" : NEON_GREEN} />
+                <Text style={[styles.modeText, mode === "obs" && styles.activeModeText]}>
+                  OBS CAMERA
                 </Text>
               </TouchableOpacity>
             </View>
-
-            {mode === "rtsp" && (
-              <>
-                <Text style={styles.inputLabel}>CAMERA IP / RTSP URL</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="192.168.100.21"
-                  placeholderTextColor={MUTED_GREEN}
-                  value={rtspUrl}
-                  onChangeText={setRtspUrl}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
-              </>
-            )}
 
             <View style={styles.modalButtonRow}>
               <TouchableOpacity style={styles.backButton} onPress={() => setModalVisible(false)}>
