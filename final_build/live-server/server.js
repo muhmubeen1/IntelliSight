@@ -126,15 +126,27 @@ function startFFmpeg(mode, rtspUrl) {
         ];
     } else if (mode === "rtsp") {
         if (!rtspUrl) {
-            throw new Error("RTSP URL is required");
+            throw new Error("Camera URL is required");
         }
 
-        inputArgs = [
-            "-rtsp_transport",
-            "tcp",
-            "-i",
-            rtspUrl,
-        ];
+        // Support both RTSP cameras and IP Webcam HTTP streams
+        if (rtspUrl.startsWith("rtsp://")) {
+            inputArgs = [
+                "-rtsp_transport",
+                "tcp",
+                "-i",
+                rtspUrl,
+            ];
+        } else {
+            console.log("Using HTTP/MJPEG camera stream");
+
+            inputArgs = [
+                "-f",
+                "mjpeg",
+                "-i",
+                rtspUrl,
+            ];
+        }
     } else {
         throw new Error("Invalid mode. Use local or rtsp");
     }
