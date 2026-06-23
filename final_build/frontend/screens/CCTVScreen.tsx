@@ -21,16 +21,11 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
-import {
-  connectLiveCamera,
-  disconnectLiveCamera,
-  getLiveStreamStatus,
-  getLiveStreamUrl,
-} from "../api";
-
+import { getLiveStreamStatus } from "../api";
 import { CAMERAS } from "../config/streams";
 
 const API_URL = "http://192.168.100.12:5000";
+const LIVE_SERVER_URL = "http://192.168.100.12:4000";
 
 const NEON_GREEN = "#10B952";
 const DARK_BG = "#050705";
@@ -45,7 +40,7 @@ export default function CCTVScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const [isStreaming, setIsStreaming] = useState(false);
-  const [streamUrl, setStreamUrl] = useState(getLiveStreamUrl());
+  const [streamUrl, setStreamUrl] = useState(`${LIVE_SERVER_URL}/index.m3u8`);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [cameraName, setCameraName] = useState("Main Entrance Camera");
@@ -77,10 +72,6 @@ export default function CCTVScreen() {
     opacity: pulseAnim.value,
   }));
 
-  const fixedStreamUrl = (url: string) => {
-    return url.replace("localhost", "192.168.100.12");
-  };
-
   const checkStatus = async () => {
     try {
       const data = await getLiveStreamStatus();
@@ -89,9 +80,9 @@ export default function CCTVScreen() {
       setMode(data.mode || "local");
 
       if (data.streamUrl) {
-        setStreamUrl(fixedStreamUrl(data.streamUrl));
+        setStreamUrl(data.streamUrl.replace("localhost", "192.168.100.12"));
       } else {
-        setStreamUrl(getLiveStreamUrl());
+        setStreamUrl(`${LIVE_SERVER_URL}/index.m3u8`);
       }
 
       setError(null);
@@ -136,20 +127,20 @@ export default function CCTVScreen() {
       hls.on(Hls.Events.ERROR, (_event, data) => {
         console.log("HLS.js Error:", data);
 
-        if (data.fatal) {
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            hls.startLoad();
-            return;
-          }
+        if (!data.fatal) return;
 
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            hls.recoverMediaError();
-            return;
-          }
-
-          setError("NO SIGNAL: Web HLS playback failed.");
-          setIsLoading(false);
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          hls.startLoad();
+          return;
         }
+
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+          return;
+        }
+
+        setError("NO SIGNAL: Web HLS playback failed.");
+        setIsLoading(false);
       });
 
       return () => {
@@ -171,16 +162,15 @@ export default function CCTVScreen() {
         });
     }
   }, [isStreaming, streamUrl]);
-  const waitForPlaylist = async (url: string, retries = 20, delay = 1000) => {
+
+  const waitForPlaylist = async (url: string, retries = 30, delay = 1000) => {
     for (let i = 0; i < retries; i++) {
       try {
         const response = await fetch(`${url}?check=${Date.now()}`, {
           method: "GET",
         });
 
-        if (response.ok) {
-          return true;
-        }
+        if (response.ok) return true;
       } catch (err) { }
 
       await new Promise((resolve) => setTimeout(resolve, delay));
@@ -195,19 +185,36 @@ export default function CCTVScreen() {
       setError(null);
 
       if (mode === "rtsp" && !rtspUrl.trim()) {
-        setError("Please enter RTSP URL.");
+        setError("Please enter camera IP or RTSP URL.");
+        setIsLoading(false);
         return;
       }
 
       const finalRtspUrl = mode === "rtsp" ? rtspUrl.trim() : "";
 
-      const data = await connectLiveCamera(mode, finalRtspUrl);
+      console.log("Sending connect request...");
 
-      console.log("Camera connected:", data);
-      const liveUrl = getLiveStreamUrl();
+      const response = await fetch(`${LIVE_SERVER_URL}/connect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mode,
+          rtspUrl: finalRtspUrl,
+        }),
+      });
+
+      const data = await response.json();
+      console.log("CONNECT RESPONSE:", data);
+
+      if (!response.ok) {
+        throw new Error(data.message || "Camera connect failed.");
+      }
+
+      const liveUrl = `${LIVE_SERVER_URL}/index.m3u8`;
 
       setModalVisible(false);
-      setIsLoading(true);
 
       const playlistReady = await waitForPlaylist(liveUrl);
 
@@ -221,8 +228,9 @@ export default function CCTVScreen() {
       setIsStreaming(true);
       setError(null);
     } catch (error: any) {
+      console.log("CONNECT ERROR:", error);
       setIsStreaming(false);
-      setError(error?.toString() || "Failed to connect camera.");
+      setError(error?.message || error?.toString() || "Failed to connect camera.");
     } finally {
       setIsLoading(false);
     }
@@ -233,7 +241,9 @@ export default function CCTVScreen() {
       setIsLoading(true);
       setError(null);
 
-      await disconnectLiveCamera();
+      await fetch(`${LIVE_SERVER_URL}/disconnect`, {
+        method: "POST",
+      });
 
       if (videoRef.current) {
         await videoRef.current.unloadAsync();
@@ -302,12 +312,7 @@ export default function CCTVScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Ionicons
-          name="radio"
-          size={32}
-          color={NEON_GREEN}
-          style={styles.neonGlow}
-        />
+        <Ionicons name="radio" size={32} color={NEON_GREEN} style={styles.neonGlow} />
         <Text style={styles.headerTitle}>LIVE SURVEILLANCE</Text>
         <Text style={styles.headerSubtitle}>NODE: CAM-0{selectedCamera}</Text>
       </View>
@@ -328,9 +333,7 @@ export default function CCTVScreen() {
           </TouchableOpacity>
         </View>
 
-        <View
-          style={[styles.videoWrapper, isAnomaly && { borderColor: ALERT_RED }]}
-        >
+        <View style={[styles.videoWrapper, isAnomaly && { borderColor: ALERT_RED }]}>
           {isStreaming && Platform.OS === "web" && (
             <video
               ref={webVideoRef}
@@ -394,9 +397,7 @@ export default function CCTVScreen() {
                   !isStreaming && { backgroundColor: MUTED_GREEN },
                 ]}
               />
-              <Text style={styles.hudText}>
-                {isStreaming ? "LIVE" : "OFFLINE"}
-              </Text>
+              <Text style={styles.hudText}>{isStreaming ? "LIVE" : "OFFLINE"}</Text>
             </View>
 
             {classification && !error && !isLoading && isStreaming && (
@@ -417,34 +418,10 @@ export default function CCTVScreen() {
               </View>
             )}
 
-            <View
-              style={[
-                styles.bracket,
-                styles.bracketTopLeft,
-                isAnomaly && { borderColor: ALERT_RED },
-              ]}
-            />
-            <View
-              style={[
-                styles.bracket,
-                styles.bracketTopRight,
-                isAnomaly && { borderColor: ALERT_RED },
-              ]}
-            />
-            <View
-              style={[
-                styles.bracket,
-                styles.bracketBottomLeft,
-                isAnomaly && { borderColor: ALERT_RED },
-              ]}
-            />
-            <View
-              style={[
-                styles.bracket,
-                styles.bracketBottomRight,
-                isAnomaly && { borderColor: ALERT_RED },
-              ]}
-            />
+            <View style={[styles.bracket, styles.bracketTopLeft, isAnomaly && { borderColor: ALERT_RED }]} />
+            <View style={[styles.bracket, styles.bracketTopRight, isAnomaly && { borderColor: ALERT_RED }]} />
+            <View style={[styles.bracket, styles.bracketBottomLeft, isAnomaly && { borderColor: ALERT_RED }]} />
+            <View style={[styles.bracket, styles.bracketBottomRight, isAnomaly && { borderColor: ALERT_RED }]} />
           </View>
         </View>
 
@@ -469,13 +446,7 @@ export default function CCTVScreen() {
                   <Ionicons
                     name={camera.active ? "videocam" : "videocam-off"}
                     size={20}
-                    color={
-                      !camera.active
-                        ? MUTED_GREEN
-                        : isSelected
-                          ? "#000"
-                          : NEON_GREEN
-                    }
+                    color={!camera.active ? MUTED_GREEN : isSelected ? "#000" : NEON_GREEN}
                     style={{ marginBottom: 5 }}
                   />
                   <Text
@@ -494,21 +465,13 @@ export default function CCTVScreen() {
         </View>
       </ScrollView>
 
-      <Modal
-        visible={modalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setModalVisible(false)}
-      >
+      <Modal visible={modalVisible} transparent animationType="fade" onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalBox}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>CONNECT CAMERA</Text>
 
-              <TouchableOpacity
-                style={styles.closeButton}
-                onPress={() => setModalVisible(false)}
-              >
+              <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}>
                 <Ionicons name="close" size={24} color={ALERT_RED} />
               </TouchableOpacity>
             </View>
@@ -525,56 +488,32 @@ export default function CCTVScreen() {
             <Text style={styles.inputLabel}>SOURCE TYPE</Text>
             <View style={styles.modeRow}>
               <TouchableOpacity
-                style={[
-                  styles.modeButton,
-                  mode === "local" && styles.activeModeButton,
-                ]}
+                style={[styles.modeButton, mode === "local" && styles.activeModeButton]}
                 onPress={() => setMode("local")}
               >
-                <Ionicons
-                  name="film"
-                  size={20}
-                  color={mode === "local" ? "#000" : NEON_GREEN}
-                />
-                <Text
-                  style={[
-                    styles.modeText,
-                    mode === "local" && styles.activeModeText,
-                  ]}
-                >
+                <Ionicons name="film" size={20} color={mode === "local" ? "#000" : NEON_GREEN} />
+                <Text style={[styles.modeText, mode === "local" && styles.activeModeText]}>
                   DEMO VIDEO
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[
-                  styles.modeButton,
-                  mode === "rtsp" && styles.activeModeButton,
-                ]}
+                style={[styles.modeButton, mode === "rtsp" && styles.activeModeButton]}
                 onPress={() => setMode("rtsp")}
               >
-                <Ionicons
-                  name="camera"
-                  size={20}
-                  color={mode === "rtsp" ? "#000" : NEON_GREEN}
-                />
-                <Text
-                  style={[
-                    styles.modeText,
-                    mode === "rtsp" && styles.activeModeText,
-                  ]}
-                >
-                  RTSP CAMERA
+                <Ionicons name="camera" size={20} color={mode === "rtsp" ? "#000" : NEON_GREEN} />
+                <Text style={[styles.modeText, mode === "rtsp" && styles.activeModeText]}>
+                  IP CAMERA
                 </Text>
               </TouchableOpacity>
             </View>
 
             {mode === "rtsp" && (
               <>
-                <Text style={styles.inputLabel}>RTSP URL</Text>
+                <Text style={styles.inputLabel}>CAMERA IP / RTSP URL</Text>
                 <TextInput
                   style={styles.input}
-                  placeholder="rtsp://admin:password@192.168.1.10:554/stream1"
+                  placeholder="192.168.100.21"
                   placeholderTextColor={MUTED_GREEN}
                   value={rtspUrl}
                   onChangeText={setRtspUrl}
@@ -585,10 +524,7 @@ export default function CCTVScreen() {
             )}
 
             <View style={styles.modalButtonRow}>
-              <TouchableOpacity
-                style={styles.backButton}
-                onPress={() => setModalVisible(false)}
-              >
+              <TouchableOpacity style={styles.backButton} onPress={() => setModalVisible(false)}>
                 <Ionicons name="arrow-back" size={18} color={MUTED_GREEN} />
                 <Text style={styles.backButtonText}>BACK</Text>
               </TouchableOpacity>
