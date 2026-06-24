@@ -1,3 +1,4 @@
+import os
 import json
 import torch
 import timm
@@ -7,8 +8,10 @@ from PIL import Image
 from torchvision import transforms
 
 
-MODEL_PATH = "saved_models/best_vit.pth"
-CLASSES_PATH = "saved_models/vit_classes.json"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+MODEL_PATH = os.path.join(BASE_DIR, "saved_models", "best_vit.pth")
+CLASSES_PATH = os.path.join(BASE_DIR, "saved_models", "vit_classes.json")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -17,22 +20,26 @@ class ViTService:
 
     def __init__(self):
 
-        checkpoint = torch.load(
+        with open(CLASSES_PATH, "r") as file:
+            class_map = json.load(file)
+
+        self.class_names = [
+            class_map[str(index)]
+            for index in range(len(class_map))
+        ]
+
+        self.model = timm.create_model(
+            "vit_base_patch16_224",
+            pretrained=False,
+            num_classes=len(self.class_names)
+        )
+
+        state_dict = torch.load(
             MODEL_PATH,
             map_location=DEVICE
         )
 
-        self.class_names = checkpoint["class_names"]
-
-        self.model = timm.create_model(
-            checkpoint["model_name"],
-            pretrained=False,
-            num_classes=checkpoint["num_classes"]
-        )
-
-        self.model.load_state_dict(
-            checkpoint["state_dict"]
-        )
+        self.model.load_state_dict(state_dict)
 
         self.model.to(DEVICE)
         self.model.eval()
@@ -59,7 +66,6 @@ class ViTService:
 
         image = self.transform(image)
         image = image.unsqueeze(0)
-
         image = image.to(DEVICE)
 
         with torch.no_grad():
@@ -82,8 +88,5 @@ class ViTService:
 
         return {
             "label": label,
-            "confidence": round(
-                confidence.item(),
-                4
-            )
+            "confidence": round(confidence.item(), 4)
         }
