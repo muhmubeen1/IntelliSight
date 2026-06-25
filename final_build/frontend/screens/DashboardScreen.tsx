@@ -62,7 +62,7 @@ export default function DashboardScreen() {
   const animatedScanStyle = useAnimatedStyle(() => {
     let laserColor = NEON_GREEN;
 
-    if (classificationResult && classificationResult !== 'Normal Activity') {
+    if (classificationResult && classificationResult !== 'NormalVideos') {
       laserColor = '#ff3333';
     }
 
@@ -91,14 +91,19 @@ export default function DashboardScreen() {
   };
 
   const getResultColor = (result: string): string => {
-    if (result === 'Normal Activity') return NEON_GREEN;
+    if (result === 'NormalVideos') return NEON_GREEN;
+    if (result === 'Unknown' || result === 'Uncertain') return '#ff9800';
     if (result === 'Error during classification') return '#f44336';
     return '#ff3333';
   };
 
   const getResultMessage = (result: string): string => {
-    if (result === 'Normal Activity') {
+    if (result === 'NormalVideos') {
       return 'SYSTEM CLEAR: No anomalies detected';
+    }
+
+    if (result === 'Unknown' || result === 'Uncertain') {
+      return `ANALYSIS UNCERTAIN: ${result}`;
     }
 
     if (result === 'Error during classification') {
@@ -143,17 +148,29 @@ export default function DashboardScreen() {
 
       const formData = new FormData();
 
+      // Get a safe filename for both Expo Web and native mobile.
       const name =
         file.fileName ||
         file.uri.split('/').pop() ||
         (file.type === 'video' ? 'upload.mp4' : 'upload.jpg');
 
+      /*
+        IMPORTANT:
+        Flask backend /api/classify expects:
+        request.files["video"]
+
+        So the FormData key must be "video".
+        Do not use "file" here.
+      */
       if (Platform.OS === 'web') {
-        const response = await fetch(file.uri);
-        const blob = await response.blob();
-        formData.append('file', blob, name);
+        // Expo Web gives a URI, so convert it into a browser Blob first.
+        const fileResponse = await fetch(file.uri);
+        const blob = await fileResponse.blob();
+
+        formData.append('video', blob, name);
       } else {
-        formData.append('file', {
+        // Native Android/iOS upload format.
+        formData.append('video', {
           uri: file.uri,
           type: file.type === 'video' ? 'video/mp4' : 'image/jpeg',
           name,
@@ -166,6 +183,11 @@ export default function DashboardScreen() {
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${token}`,
+
+          /*
+            Do not manually set Content-Type for multipart/form-data.
+            fetch will automatically add the correct boundary.
+          */
         },
       });
 
@@ -177,7 +199,15 @@ export default function DashboardScreen() {
         throw new Error(data.error || data.msg || `HTTP ${response.status}`);
       }
 
-      setClassificationResult(data.result || 'Unknown');
+      /*
+        New backend fusion response fields:
+        - final_label
+        - final_confidence
+        - alert_required
+        - vit_prediction
+        - i3d_prediction
+      */
+      setClassificationResult(data.final_label || 'Unknown');
       setAnalysisData(data);
       setShowResultModal(true);
     } catch (error) {
@@ -350,27 +380,29 @@ export default function DashboardScreen() {
 
             <Text style={styles.modalLabel}>Final Result</Text>
             <Text style={styles.modalValue}>
-              {analysisData?.result || 'Unknown'}
+              {analysisData?.final_label || 'Unknown'}
             </Text>
 
             <Text style={styles.modalLabel}>Confidence</Text>
             <Text style={styles.modalValue}>
-              {(Number(analysisData?.confidence || 0) * 100).toFixed(1)}%
+              {(Number(analysisData?.final_confidence || 0) * 100).toFixed(1)}%
             </Text>
 
             <Text style={styles.modalLabel}>I3D Prediction</Text>
             <Text style={styles.modalValue}>
-              {analysisData?.i3d_prediction?.label || 'N/A'} - {((analysisData?.i3d_prediction?.confidence || 0) * 100).toFixed(1)}%
+              {analysisData?.i3d_prediction?.label || 'N/A'} -{' '}
+              {((analysisData?.i3d_prediction?.confidence || 0) * 100).toFixed(1)}%
             </Text>
 
             <Text style={styles.modalLabel}>ViT Prediction</Text>
             <Text style={styles.modalValue}>
-              {analysisData?.vit_prediction?.label || 'N/A'} - {((analysisData?.vit_prediction?.confidence || 0) * 100).toFixed(1)}%
+              {analysisData?.vit_prediction?.label || 'N/A'} -{' '}
+              {((analysisData?.vit_prediction?.confidence || 0) * 100).toFixed(1)}%
             </Text>
 
             <Text style={styles.modalLabel}>Alert Status</Text>
             <Text style={styles.modalValue}>
-              {analysisData?.alert_created ? 'Alert Generated' : 'No Alert'}
+              {analysisData?.alert_required ? 'Alert Generated' : 'No Alert'}
             </Text>
           </View>
         </View>
