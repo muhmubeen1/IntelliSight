@@ -1,3 +1,22 @@
+/**
+ * ============================================================
+ * CCTVScreen.tsx — IntelliSight Live Surveillance Screen
+ * ============================================================
+ *
+ * PURPOSE:
+ *   Displays a live camera feed from one of three sources:
+ *     1. Demo video  (local test.mp4 on the server)
+ *     2. Mobile cam  (phone running IP Webcam app)
+ *     3. IP camera   (real CCTV camera on the LAN)
+ *
+ *   Also shows real-time AI classification results overlaid
+ *   on the video feed (anomaly detection from Python backend).
+ *
+ * UI DESIGN: unchanged from original
+ * LOGIC:     rewritten for production reliability
+ * ============================================================
+ */
+
 import { Ionicons } from "@expo/vector-icons";
 import { AVPlaybackStatus, ResizeMode, Video } from "expo-av";
 import Hls from "hls.js";
@@ -24,44 +43,96 @@ import Animated, {
 import { getLiveStreamStatus } from "../api";
 import { CAMERAS } from "../config/streams";
 
+// ─────────────────────────────────────────────────────────────
+// CONSTANTS
+// ─────────────────────────────────────────────────────────────
+
+/** Python AI inference server */
 const API_URL = "http://192.168.100.12:5000";
+
+/** Node.js live stream server */
 const LIVE_SERVER_URL = "http://192.168.100.12:4000";
 
+// UI colors — unchanged from original
 const NEON_GREEN = "#10B952";
 const DARK_BG = "#050705";
 const MUTED_GREEN = "#8A9A8D";
 const ALERT_RED = "#ff3333";
 
-type StreamMode = "local" | "obs";
+// ─────────────────────────────────────────────────────────────
+// TYPES
+// ─────────────────────────────────────────────────────────────
 
+/**
+ * StreamMode defines which camera source the user has selected.
+ *
+ *   local      → loop the demo video (test.mp4) stored on the server
+ *   mobile-cam → connect to phone running IP Webcam app via HTTP MJPEG
+ *   ip-camera  → connect to real CCTV camera via RTSP on the LAN
+ */
+type StreamMode = "local" | "mobile-cam" | "ip-camera";
+
+// ─────────────────────────────────────────────────────────────
+// COMPONENT
+// ─────────────────────────────────────────────────────────────
 export default function CCTVScreen() {
+
+  // ── Camera node selection (the grid at the bottom) ─────────
   const [selectedCamera, setSelectedCamera] = useState(1);
+
+  // ── Loading / error state ───────────────────────────────────
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // ── Stream state ────────────────────────────────────────────
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamUrl, setStreamUrl] = useState(`${LIVE_SERVER_URL}/index.m3u8`);
 
+  // ── Modal (connect camera dialog) ──────────────────────────
   const [modalVisible, setModalVisible] = useState(false);
+
+  // ── Form fields inside the modal ───────────────────────────
   const [cameraName, setCameraName] = useState("Main Entrance Camera");
+
+  /**
+   * mode: which source the user selected in the modal
+   * Defaults to "local" so demo works out of the box.
+   */
   const [mode, setMode] = useState<StreamMode>("local");
 
+  /**
+   * mobileStreamUrl: URL entered by the user for mobile-cam mode
+   * Example: http://192.168.100.21:8080/video
+   */
+  const [mobileStreamUrl, setMobileStreamUrl] = useState(
+    "http://192.168.100.21:8080/video"
+  );
+
+  /**
+   * ipAddress: camera IP entered by the user for ip-camera mode
+   * Example: 192.168.1.64
+   */
+  const [ipAddress, setIpAddress] = useState("");
+  const [ipUsername, setIpUsername] = useState("admin");
+  const [ipPassword, setIpPassword] = useState("");
+
+  // ── AI classification result overlay ───────────────────────
   const [classification, setClassification] = useState<{
     result: string;
     confidence: number;
     timestamp: number;
   } | null>(null);
 
+  // ── Video player refs ───────────────────────────────────────
   const videoRef = useRef<Video>(null);
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  // ── Pulse animation for the LIVE/OFFLINE dot ───────────────
   const pulseAnim = useSharedValue(1);
 
   useEffect(() => {
     pulseAnim.value = withRepeat(
-      withTiming(0.2, {
-        duration: 800,
-        easing: Easing.inOut(Easing.ease),
-      }),
+      withTiming(0.2, { duration: 800, easing: Easing.inOut(Easing.ease) }),
       -1,
       true
     );
@@ -71,30 +142,47 @@ export default function CCTVScreen() {
     opacity: pulseAnim.value,
   }));
 
+  // ─────────────────────────────────────────────────────────────
+  // ON MOUNT: check server status
+  // Restores the streaming state if the app was reloaded while
+  // the server was already streaming.
+  // ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    checkStatus();
+  }, []);
+
   const checkStatus = async () => {
     try {
       const data = await getLiveStreamStatus();
 
       setIsStreaming(data.isStreaming || false);
-      setMode(data.mode === "obs" ? "obs" : "local");
+
+      // Restore mode from server state
+      if (data.mode === "mobile-cam") setMode("mobile-cam");
+      else if (data.mode === "ip-camera") setMode("ip-camera");
+      else setMode("local");
 
       if (data.streamUrl) {
+        // Replace localhost with actual server IP in case server
+        // returned a localhost URL (happens in some configs)
         setStreamUrl(data.streamUrl.replace("localhost", "192.168.100.12"));
       } else {
         setStreamUrl(`${LIVE_SERVER_URL}/index.m3u8`);
       }
 
       setError(null);
-    } catch (err) {
+    } catch {
       setIsStreaming(false);
       setError("Live server not reachable.");
     }
   };
 
-  useEffect(() => {
-    checkStatus();
-  }, []);
-
+  // ─────────────────────────────────────────────────────────────
+  // HLS PLAYER SETUP (web only)
+  // Sets up HLS.js when running on web platform.
+  // HLS.js handles the playlist polling and segment loading.
+  // On native (iOS/Android), expo-av handles HLS natively.
+  // ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (Platform.OS !== "web") return;
     if (!isStreaming || !streamUrl || !webVideoRef.current) return;
@@ -111,24 +199,19 @@ export default function CCTVScreen() {
       hls.attachMedia(video);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video
-          .play()
-          .then(() => {
-            setError(null);
-            setIsLoading(false);
-          })
+        video.play()
+          .then(() => { setError(null); setIsLoading(false); })
           .catch(() => {
-            setError("NO SIGNAL: Browser blocked video autoplay.");
+            setError("NO SIGNAL: Browser blocked autoplay. Click play.");
             setIsLoading(false);
           });
       });
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        console.log("HLS.js Error:", data);
-
-        if (!data.fatal) return;
+        if (!data.fatal) return; // ignore non-fatal errors
 
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          // Network errors are often temporary — try to recover
           hls.startLoad();
           return;
         }
@@ -138,109 +221,159 @@ export default function CCTVScreen() {
           return;
         }
 
-        setError("NO SIGNAL: Web HLS playback failed.");
+        // Fatal unrecoverable error
+        setError("NO SIGNAL: HLS playback failed.");
         setIsLoading(false);
+        hls.destroy();
       });
 
-      return () => {
-        hls.destroy();
-      };
+      // Cleanup HLS instance when component unmounts or stream changes
+      return () => { hls.destroy(); };
     }
 
+    // Fallback for Safari — supports HLS natively
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = streamUrl;
-      video
-        .play()
-        .then(() => {
-          setError(null);
-          setIsLoading(false);
-        })
+      video.play()
+        .then(() => { setError(null); setIsLoading(false); })
         .catch(() => {
-          setError("NO SIGNAL: Browser blocked video autoplay.");
+          setError("NO SIGNAL: Browser blocked autoplay.");
           setIsLoading(false);
         });
     }
   }, [isStreaming, streamUrl]);
 
-  const waitForPlaylist = async (url: string, retries = 30, delay = 1000) => {
+  // ─────────────────────────────────────────────────────────────
+  // waitForPlaylist
+  // After calling /connect, FFmpeg needs a few seconds to start
+  // generating HLS segments. This function polls the m3u8 URL
+  // until it responds with 200 OK, then the frontend starts playing.
+  //
+  // retries: how many times to check before giving up
+  // delay:   milliseconds between each check
+  // ─────────────────────────────────────────────────────────────
+  const waitForPlaylist = async (
+    url: string,
+    retries = 30,
+    delay = 1000
+  ): Promise<boolean> => {
     for (let i = 0; i < retries; i++) {
       try {
-        const response = await fetch(`${url}?check=${Date.now()}`, {
-          method: "GET",
-        });
-
-        if (response.ok) return true;
-      } catch (err) { }
-
+        // Add cache-busting param so browser doesn't cache 404 response
+        const res = await fetch(`${url}?t=${Date.now()}`, { method: "GET" });
+        if (res.ok) return true;
+      } catch {
+        // Server not ready yet — keep waiting
+      }
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
-
-    return false;
+    return false; // Timed out
   };
 
+  // ─────────────────────────────────────────────────────────────
+  // handleConnectCamera
+  // Called when user taps CONNECT in the modal.
+  // Builds the correct request body based on the selected mode
+  // and sends it to the server's /connect endpoint.
+  // ─────────────────────────────────────────────────────────────
   const handleConnectCamera = async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      const selectedMode = mode === "obs" ? "obs" : "local";
+      // ── Build request body based on selected mode ───────────
+      let requestBody: Record<string, string> = { mode };
 
-      console.log("Sending connect request...");
+      if (mode === "mobile-cam") {
+        // Send the phone's stream URL
+        if (!mobileStreamUrl.trim()) {
+          throw new Error("Please enter the phone camera URL.");
+        }
+        requestBody.streamUrl = mobileStreamUrl.trim();
 
+      } else if (mode === "ip-camera") {
+        // Send camera IP (server builds the RTSP URL)
+        // OR send a full RTSP URL directly if user entered one
+        if (!ipAddress.trim()) {
+          throw new Error("Please enter the camera IP address.");
+        }
+
+        if (ipAddress.startsWith("rtsp://")) {
+          // User entered a full RTSP URL
+          requestBody.streamUrl = ipAddress.trim();
+        } else {
+          // User entered just an IP — server will build the RTSP URL
+          requestBody.ip = ipAddress.trim();
+          requestBody.username = ipUsername.trim() || "admin";
+          requestBody.password = ipPassword.trim();
+        }
+      }
+      // For "local" mode, no extra fields needed
+
+      console.log("[CONNECT] Sending request:", requestBody);
+
+      // ── Call server /connect endpoint ───────────────────────
       const response = await fetch(`${LIVE_SERVER_URL}/connect`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          mode: selectedMode,
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
       });
 
       const data = await response.json();
-      console.log("CONNECT RESPONSE:", data);
+      console.log("[CONNECT] Response:", data);
 
       if (!response.ok) {
         throw new Error(data.message || "Camera connect failed.");
       }
 
-      const liveUrl = `${LIVE_SERVER_URL}/index.m3u8`;
-
+      // Close modal immediately — show loading state on video
       setModalVisible(false);
 
+      const liveUrl = `${LIVE_SERVER_URL}/index.m3u8`;
+
+      // ── Wait for FFmpeg to generate the first HLS segments ──
+      // FFmpeg needs 2-4 seconds to start writing .ts files.
+      // We poll until the playlist file exists on the server.
       const playlistReady = await waitForPlaylist(liveUrl);
 
       if (!playlistReady) {
         setIsStreaming(false);
-        setError("NO SIGNAL: HLS playlist was not generated.");
+        setError("NO SIGNAL: Stream did not start in time. Check camera connection.");
         return;
       }
 
+      // Stream is ready — update URL with cache buster and start playback
       setStreamUrl(`${liveUrl}?t=${Date.now()}`);
       setIsStreaming(true);
       setError(null);
-    } catch (error: any) {
-      console.log("CONNECT ERROR:", error);
+
+    } catch (err: any) {
+      console.error("[CONNECT] Error:", err);
       setIsStreaming(false);
-      setError(error?.message || error?.toString() || "Failed to connect camera.");
+      setError(err?.message || "Failed to connect camera.");
     } finally {
       setIsLoading(false);
     }
   };
 
+  // ─────────────────────────────────────────────────────────────
+  // disconnectCamera
+  // Stops the stream by calling /disconnect on the server.
+  // Also clears the video player on the frontend.
+  // ─────────────────────────────────────────────────────────────
   const disconnectCamera = async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      await fetch(`${LIVE_SERVER_URL}/disconnect`, {
-        method: "POST",
-      });
+      await fetch(`${LIVE_SERVER_URL}/disconnect`, { method: "POST" });
 
+      // Clear native video player
       if (videoRef.current) {
         await videoRef.current.unloadAsync();
       }
 
+      // Clear web video player
       if (webVideoRef.current) {
         webVideoRef.current.pause();
         webVideoRef.current.removeAttribute("src");
@@ -249,48 +382,42 @@ export default function CCTVScreen() {
 
       setIsStreaming(false);
       setError("NO SIGNAL: Stream disconnected.");
-    } catch (error: any) {
-      setError(error?.toString() || "Failed to disconnect stream.");
+
+    } catch (err: any) {
+      setError(err?.toString() || "Failed to disconnect stream.");
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleVideoError = () => {
-    setError("NO SIGNAL: Connection to node lost.");
-    setIsLoading(false);
-  };
-
-  const handleVideoLoad = () => {
-    setIsLoading(false);
-    setError(null);
-  };
-
-  const handlePlaybackStatusUpdate = (status: AVPlaybackStatus) => {
-    if (!status.isLoaded) {
-      if (status.error) setError(`FEED ERROR: ${status.error}`);
-    } else {
-      setIsLoading(false);
-    }
-  };
-
+  // ─────────────────────────────────────────────────────────────
+  // AI Classification polling
+  // Fetches the latest anomaly detection result from the Python
+  // backend every 2 seconds and shows it overlaid on the video.
+  // ─────────────────────────────────────────────────────────────
   useEffect(() => {
     const fetchClassification = async () => {
       try {
         const response = await fetch(`${API_URL}/live-classification`);
         const data = await response.json();
         setClassification(data);
-      } catch (err) { }
+      } catch {
+        // Silently ignore — AI server may not be running yet
+      }
     };
 
     fetchClassification();
     const interval = setInterval(fetchClassification, 2000);
-
     return () => clearInterval(interval);
   }, []);
 
   const isAnomaly = classification && classification.result !== "NormalVideos";
 
+  // ─────────────────────────────────────────────────────────────
+  // switchCamera
+  // Switches the selected camera node in the grid.
+  // Only switches to active cameras.
+  // ─────────────────────────────────────────────────────────────
   const switchCamera = (cameraId: number) => {
     const camera = CAMERAS.find((cam) => cam.id === cameraId);
     if (!camera || !camera.active) return;
@@ -300,8 +427,14 @@ export default function CCTVScreen() {
     setError(null);
   };
 
+  // ─────────────────────────────────────────────────────────────
+  // RENDER
+  // UI is identical to the original design.
+  // ─────────────────────────────────────────────────────────────
   return (
     <View style={styles.container}>
+
+      {/* ── Header ─────────────────────────────────────────── */}
       <View style={styles.header}>
         <Ionicons name="radio" size={32} color={NEON_GREEN} style={styles.neonGlow} />
         <Text style={styles.headerTitle}>LIVE SURVEILLANCE</Text>
@@ -309,6 +442,8 @@ export default function CCTVScreen() {
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 20 }}>
+
+        {/* ── Top action buttons ──────────────────────────── */}
         <View style={styles.topActionRow}>
           <TouchableOpacity
             style={styles.connectCameraButton}
@@ -324,16 +459,14 @@ export default function CCTVScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* ── Video player ────────────────────────────────── */}
         <View style={[styles.videoWrapper, isAnomaly && { borderColor: ALERT_RED }]}>
+
+          {/* Web platform: use <video> tag with HLS.js */}
           {isStreaming && Platform.OS === "web" && (
             <video
               ref={webVideoRef}
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                backgroundColor: "#000",
-              }}
+              style={{ width: "100%", height: "100%", objectFit: "cover", backgroundColor: "#000" }}
               muted
               autoPlay
               playsInline
@@ -341,6 +474,7 @@ export default function CCTVScreen() {
             />
           )}
 
+          {/* Native platform: use expo-av Video component */}
           {isStreaming && Platform.OS !== "web" && (
             <Video
               ref={videoRef}
@@ -352,12 +486,25 @@ export default function CCTVScreen() {
                 uri: streamUrl,
                 overrideFileExtensionAndroid: "m3u8",
               }}
-              onError={handleVideoError}
-              onLoad={handleVideoLoad}
-              onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
+              onError={() => {
+                setError("NO SIGNAL: Connection to node lost.");
+                setIsLoading(false);
+              }}
+              onLoad={() => {
+                setIsLoading(false);
+                setError(null);
+              }}
+              onPlaybackStatusUpdate={(status: AVPlaybackStatus) => {
+                if (!status.isLoaded && status.error) {
+                  setError(`FEED ERROR: ${status.error}`);
+                } else if (status.isLoaded) {
+                  setIsLoading(false);
+                }
+              }}
             />
           )}
 
+          {/* Loading overlay */}
           {isLoading && !error && (
             <View style={styles.overlayCenter}>
               <ActivityIndicator size="large" color={NEON_GREEN} />
@@ -365,6 +512,7 @@ export default function CCTVScreen() {
             </View>
           )}
 
+          {/* No camera connected overlay */}
           {!isStreaming && !isLoading && (
             <View style={styles.overlayCenter}>
               <Ionicons name="videocam-off" size={42} color={MUTED_GREEN} />
@@ -372,6 +520,7 @@ export default function CCTVScreen() {
             </View>
           )}
 
+          {/* Error overlay */}
           {error && (
             <View style={styles.overlayCenter}>
               <Ionicons name="warning-outline" size={40} color={ALERT_RED} />
@@ -379,7 +528,10 @@ export default function CCTVScreen() {
             </View>
           )}
 
+          {/* HUD overlays (LIVE dot, classification, brackets) */}
           <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
+
+            {/* LIVE / OFFLINE indicator */}
             <View style={styles.hudTopRight}>
               <Animated.View
                 style={[
@@ -391,14 +543,13 @@ export default function CCTVScreen() {
               <Text style={styles.hudText}>{isStreaming ? "LIVE" : "OFFLINE"}</Text>
             </View>
 
+            {/* AI classification result */}
             {classification && !error && !isLoading && isStreaming && (
               <View style={styles.hudBottomLeft}>
-                <Text
-                  style={[
-                    styles.classificationText,
-                    isAnomaly ? { color: ALERT_RED } : { color: NEON_GREEN },
-                  ]}
-                >
+                <Text style={[
+                  styles.classificationText,
+                  isAnomaly ? { color: ALERT_RED } : { color: NEON_GREEN },
+                ]}>
                   {isAnomaly
                     ? `⚠️ THREAT: ${classification.result.toUpperCase()}`
                     : "SYSTEM CLEAR"}
@@ -409,6 +560,7 @@ export default function CCTVScreen() {
               </View>
             )}
 
+            {/* Corner brackets */}
             <View style={[styles.bracket, styles.bracketTopLeft, isAnomaly && { borderColor: ALERT_RED }]} />
             <View style={[styles.bracket, styles.bracketTopRight, isAnomaly && { borderColor: ALERT_RED }]} />
             <View style={[styles.bracket, styles.bracketBottomLeft, isAnomaly && { borderColor: ALERT_RED }]} />
@@ -416,13 +568,13 @@ export default function CCTVScreen() {
           </View>
         </View>
 
+        {/* ── Camera node grid ────────────────────────────── */}
         <View style={styles.controlsContainer}>
           <Text style={styles.controlsTitle}>NETWORK NODES</Text>
 
           <View style={styles.buttonGrid}>
             {CAMERAS.map((camera) => {
               const isSelected = selectedCamera === camera.id;
-
               return (
                 <TouchableOpacity
                   key={camera.id}
@@ -440,13 +592,11 @@ export default function CCTVScreen() {
                     color={!camera.active ? MUTED_GREEN : isSelected ? "#000" : NEON_GREEN}
                     style={{ marginBottom: 5 }}
                   />
-                  <Text
-                    style={[
-                      styles.buttonText,
-                      isSelected && { color: "#000", fontWeight: "900" },
-                      !camera.active && styles.inactiveButtonText,
-                    ]}
-                  >
+                  <Text style={[
+                    styles.buttonText,
+                    isSelected && { color: "#000", fontWeight: "900" },
+                    !camera.active && styles.inactiveButtonText,
+                  ]}>
                     {camera.name.toUpperCase()}
                   </Text>
                 </TouchableOpacity>
@@ -456,17 +606,25 @@ export default function CCTVScreen() {
         </View>
       </ScrollView>
 
-      <Modal visible={modalVisible} transparent animationType="fade" onRequestClose={() => setModalVisible(false)}>
+      {/* ── Connect Camera Modal ─────────────────────────────── */}
+      <Modal
+        visible={modalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setModalVisible(false)}
+      >
         <View style={styles.modalOverlay}>
           <View style={styles.modalBox}>
+
+            {/* Modal header */}
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>CONNECT CAMERA</Text>
-
               <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}>
                 <Ionicons name="close" size={24} color={ALERT_RED} />
               </TouchableOpacity>
             </View>
 
+            {/* Camera name input */}
             <Text style={styles.inputLabel}>CAMERA NAME</Text>
             <TextInput
               style={styles.input}
@@ -476,9 +634,12 @@ export default function CCTVScreen() {
               onChangeText={setCameraName}
             />
 
+            {/* Source type selector */}
             <Text style={styles.inputLabel}>SOURCE TYPE</Text>
 
             <View style={styles.modeRow}>
+
+              {/* Demo Video button */}
               <TouchableOpacity
                 style={[styles.modeButton, mode === "local" && styles.activeModeButton]}
                 onPress={() => setMode("local")}
@@ -489,19 +650,103 @@ export default function CCTVScreen() {
                 </Text>
               </TouchableOpacity>
 
+              {/* Mobile Camera button */}
               <TouchableOpacity
-                style={[styles.modeButton, mode === "obs" && styles.activeModeButton]}
-                onPress={() => setMode("obs")}
+                style={[styles.modeButton, mode === "mobile-cam" && styles.activeModeButton]}
+                onPress={() => setMode("mobile-cam")}
               >
-                <Ionicons name="camera" size={20} color={mode === "obs" ? "#000" : NEON_GREEN} />
-                <Text style={[styles.modeText, mode === "obs" && styles.activeModeText]}>
-                  OBS CAMERA
+                <Ionicons name="phone-portrait" size={20} color={mode === "mobile-cam" ? "#000" : NEON_GREEN} />
+                <Text style={[styles.modeText, mode === "mobile-cam" && styles.activeModeText]}>
+                  MOBILE CAM
                 </Text>
               </TouchableOpacity>
+
+              {/* IP Camera button */}
+              <TouchableOpacity
+                style={[styles.modeButton, mode === "ip-camera" && styles.activeModeButton]}
+                onPress={() => setMode("ip-camera")}
+              >
+                <Ionicons name="camera" size={20} color={mode === "ip-camera" ? "#000" : NEON_GREEN} />
+                <Text style={[styles.modeText, mode === "ip-camera" && styles.activeModeText]}>
+                  IP CAMERA
+                </Text>
+              </TouchableOpacity>
+
             </View>
 
+            {/* ── Mobile cam fields ───────────────────────── */}
+            {mode === "mobile-cam" && (
+              <>
+                <Text style={styles.inputLabel}>PHONE STREAM URL</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="http://192.168.100.21:8080/video"
+                  placeholderTextColor={MUTED_GREEN}
+                  value={mobileStreamUrl}
+                  onChangeText={setMobileStreamUrl}
+                  autoCapitalize="none"
+                  keyboardType="url"
+                />
+                <Text style={styles.hintText}>
+                  Install IP Webcam app → Start Server → copy the URL shown
+                </Text>
+              </>
+            )}
+
+            {/* ── IP camera fields ────────────────────────── */}
+            {mode === "ip-camera" && (
+              <>
+                <Text style={styles.inputLabel}>CAMERA IP ADDRESS</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="192.168.1.64  or  rtsp://admin:pass@IP:554/stream"
+                  placeholderTextColor={MUTED_GREEN}
+                  value={ipAddress}
+                  onChangeText={setIpAddress}
+                  autoCapitalize="none"
+                  keyboardType="url"
+                />
+
+                <View style={styles.credentialsRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inputLabel}>USERNAME</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="admin"
+                      placeholderTextColor={MUTED_GREEN}
+                      value={ipUsername}
+                      onChangeText={setIpUsername}
+                      autoCapitalize="none"
+                    />
+                  </View>
+
+                  <View style={{ width: 10 }} />
+
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inputLabel}>PASSWORD</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="••••••••"
+                      placeholderTextColor={MUTED_GREEN}
+                      value={ipPassword}
+                      onChangeText={setIpPassword}
+                      secureTextEntry
+                    />
+                  </View>
+                </View>
+
+                <Text style={styles.hintText}>
+                  Connect camera to the same router as this device via LAN cable or Wi-Fi
+                </Text>
+              </>
+            )}
+
+            {/* ── Modal action buttons ─────────────────────── */}
             <View style={styles.modalButtonRow}>
-              <TouchableOpacity style={styles.backButton} onPress={() => setModalVisible(false)}>
+              <TouchableOpacity
+                style={styles.backButton}
+                onPress={() => setModalVisible(false)}
+              >
                 <Ionicons name="arrow-back" size={18} color={MUTED_GREEN} />
                 <Text style={styles.backButtonText}>BACK</Text>
               </TouchableOpacity>
@@ -521,6 +766,7 @@ export default function CCTVScreen() {
                 )}
               </TouchableOpacity>
             </View>
+
           </View>
         </View>
       </Modal>
@@ -528,6 +774,9 @@ export default function CCTVScreen() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// STYLES — identical to original, with additions for new fields
+// ─────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: DARK_BG },
 
@@ -559,11 +808,7 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
   },
 
-  topActionRow: {
-    flexDirection: "row",
-    gap: 12,
-    marginBottom: 16,
-  },
+  topActionRow: { flexDirection: "row", gap: 12, marginBottom: 16 },
   connectCameraButton: {
     flex: 1,
     backgroundColor: NEON_GREEN,
@@ -574,11 +819,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
   },
-  connectCameraText: {
-    color: "#000",
-    fontWeight: "900",
-    letterSpacing: 1,
-  },
+  connectCameraText: { color: "#000", fontWeight: "900", letterSpacing: 1 },
   stopButton: {
     width: 110,
     borderWidth: 1,
@@ -589,10 +830,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 6,
   },
-  stopButtonText: {
-    color: ALERT_RED,
-    fontWeight: "900",
-  },
+  stopButtonText: { color: ALERT_RED, fontWeight: "900" },
 
   videoWrapper: {
     width: "100%",
@@ -647,12 +885,7 @@ const styles = StyleSheet.create({
     backgroundColor: ALERT_RED,
     marginRight: 6,
   },
-  hudText: {
-    color: "#fff",
-    fontSize: 10,
-    fontWeight: "bold",
-    letterSpacing: 1,
-  },
+  hudText: { color: "#fff", fontSize: 10, fontWeight: "bold", letterSpacing: 1 },
 
   hudBottomLeft: {
     position: "absolute",
@@ -664,11 +897,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
   },
-  classificationText: {
-    fontSize: 14,
-    fontWeight: "900",
-    letterSpacing: 1,
-  },
+  classificationText: { fontSize: 14, fontWeight: "900", letterSpacing: 1 },
   confidenceText: {
     color: "rgba(255,255,255,0.7)",
     fontSize: 10,
@@ -682,30 +911,10 @@ const styles = StyleSheet.create({
     height: 20,
     borderColor: "rgba(16, 185, 82, 0.6)",
   },
-  bracketTopLeft: {
-    top: 10,
-    left: 10,
-    borderTopWidth: 2,
-    borderLeftWidth: 2,
-  },
-  bracketTopRight: {
-    top: 10,
-    right: 10,
-    borderTopWidth: 2,
-    borderRightWidth: 2,
-  },
-  bracketBottomLeft: {
-    bottom: 10,
-    left: 10,
-    borderBottomWidth: 2,
-    borderLeftWidth: 2,
-  },
-  bracketBottomRight: {
-    bottom: 10,
-    right: 10,
-    borderBottomWidth: 2,
-    borderRightWidth: 2,
-  },
+  bracketTopLeft: { top: 10, left: 10, borderTopWidth: 2, borderLeftWidth: 2 },
+  bracketTopRight: { top: 10, right: 10, borderTopWidth: 2, borderRightWidth: 2 },
+  bracketBottomLeft: { bottom: 10, left: 10, borderBottomWidth: 2, borderLeftWidth: 2 },
+  bracketBottomRight: { bottom: 10, right: 10, borderBottomWidth: 2, borderRightWidth: 2 },
 
   controlsContainer: {
     backgroundColor: "rgba(16, 185, 82, 0.02)",
@@ -745,18 +954,14 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     elevation: 5,
   },
-  buttonText: {
-    color: NEON_GREEN,
-    fontSize: 12,
-    fontWeight: "bold",
-    letterSpacing: 1,
-  },
+  buttonText: { color: NEON_GREEN, fontSize: 12, fontWeight: "bold", letterSpacing: 1 },
   inactiveButton: {
     borderColor: "rgba(138, 154, 141, 0.2)",
     backgroundColor: "rgba(255,255,255,0.02)",
   },
   inactiveButtonText: { color: MUTED_GREEN },
 
+  // Modal styles
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.85)",
@@ -776,15 +981,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 18,
   },
-  modalTitle: {
-    color: "#fff",
-    fontSize: 18,
-    fontWeight: "900",
-    letterSpacing: 2,
-  },
-  closeButton: {
-    padding: 5,
-  },
+  modalTitle: { color: "#fff", fontSize: 18, fontWeight: "900", letterSpacing: 2 },
+  closeButton: { padding: 5 },
+
   inputLabel: {
     color: MUTED_GREEN,
     fontSize: 12,
@@ -801,37 +1000,33 @@ const styles = StyleSheet.create({
     backgroundColor: "#020503",
     marginBottom: 16,
   },
-  modeRow: {
-    flexDirection: "row",
-    gap: 10,
+
+  // Hint text below input fields
+  hintText: {
+    color: MUTED_GREEN,
+    fontSize: 11,
+    marginTop: -10,
     marginBottom: 16,
+    letterSpacing: 0.5,
   },
+
+  // Username + password side by side
+  credentialsRow: { flexDirection: "row" },
+
+  modeRow: { flexDirection: "row", gap: 8, marginBottom: 16 },
   modeButton: {
     flex: 1,
     borderWidth: 1,
     borderColor: "rgba(16,185,82,0.35)",
     borderRadius: 10,
-    paddingVertical: 14,
+    paddingVertical: 12,
     alignItems: "center",
   },
-  activeModeButton: {
-    backgroundColor: NEON_GREEN,
-    borderColor: NEON_GREEN,
-  },
-  modeText: {
-    color: NEON_GREEN,
-    marginTop: 6,
-    fontSize: 11,
-    fontWeight: "900",
-  },
-  activeModeText: {
-    color: "#000",
-  },
-  modalButtonRow: {
-    flexDirection: "row",
-    gap: 12,
-    marginTop: 5,
-  },
+  activeModeButton: { backgroundColor: NEON_GREEN, borderColor: NEON_GREEN },
+  modeText: { color: NEON_GREEN, marginTop: 6, fontSize: 10, fontWeight: "900" },
+  activeModeText: { color: "#000" },
+
+  modalButtonRow: { flexDirection: "row", gap: 12, marginTop: 5 },
   backButton: {
     flex: 1,
     borderWidth: 1,
@@ -843,10 +1038,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 6,
   },
-  backButtonText: {
-    color: MUTED_GREEN,
-    fontWeight: "900",
-  },
+  backButtonText: { color: MUTED_GREEN, fontWeight: "900" },
   modalConnectButton: {
     flex: 1,
     backgroundColor: NEON_GREEN,
@@ -857,8 +1049,5 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 6,
   },
-  modalConnectText: {
-    color: "#000",
-    fontWeight: "900",
-  },
+  modalConnectText: { color: "#000", fontWeight: "900" },
 });
