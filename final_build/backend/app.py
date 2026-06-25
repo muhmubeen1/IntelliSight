@@ -26,11 +26,16 @@ from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from models import db, User, Role, UserRole
 from ai_services.ai_pipeline import run_ai_pipeline
+from ai_services.video_prediction_service import predict_video
+from ai_services.i3d_service import I3DService
+from ai_services.fusion_service import FusionService
 
 # Load environment variables from .env
 load_dotenv()
 
 app = Flask(__name__)
+i3d_service = I3DService()
+fusion_service = FusionService()
 CORS(app)
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.config['PROPAGATE_EXCEPTIONS'] = True
