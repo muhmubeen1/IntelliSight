@@ -1,10 +1,11 @@
+# True I3D service for IntelliSight
+
 import os
 import json
 import cv2
 import torch
-import numpy as np
 import torch.nn as nn
-import torchvision.models.video as video_models
+import numpy as np
 
 
 class I3DService:
@@ -22,8 +23,16 @@ class I3DService:
         self.idx_to_class = {v: k for k, v in class_to_idx.items()}
         self.num_classes = len(class_to_idx)
 
-        self.model = video_models.r3d_18(weights=None)
-        self.model.fc = nn.Linear(self.model.fc.in_features, self.num_classes)
+        self.model = torch.hub.load(
+            "facebookresearch/pytorchvideo",
+            "i3d_r50",
+            pretrained=False
+        )
+
+        self.model.blocks[-1].proj = nn.Linear(
+            self.model.blocks[-1].proj.in_features,
+            self.num_classes
+        )
 
         state_dict = torch.load(self.model_path, map_location=self.device)
         self.model.load_state_dict(state_dict)
@@ -31,9 +40,9 @@ class I3DService:
         self.model.to(self.device)
         self.model.eval()
 
-        print("[INFO] I3D/R3D Model Loaded")
+        print("[INFO] True I3D Model Loaded")
 
-    def load_video_frames(self, video_path, clip_len=32, frame_size=112):
+    def load_video_frames(self, video_path, clip_len=32, frame_size=224):
         cap = cv2.VideoCapture(video_path)
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -43,6 +52,7 @@ class I3DService:
             return None
 
         frame_indices = np.linspace(0, total_frames - 1, clip_len).astype(int)
+
         frames = []
 
         for frame_idx in frame_indices:
@@ -65,7 +75,7 @@ class I3DService:
 
         frames = np.array(frames, dtype=np.float32)
 
-        # T,H,W,C → C,T,H,W
+        # T,H,W,C -> C,T,H,W
         frames = np.transpose(frames, (3, 0, 1, 2))
 
         frames = torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
@@ -89,9 +99,8 @@ class I3DService:
             confidence, predicted_idx = torch.max(probabilities, 1)
 
         label = self.idx_to_class[predicted_idx.item()]
-        confidence = float(confidence.item())
 
         return {
             "label": label,
-            "confidence": round(confidence, 4)
+            "confidence": round(float(confidence.item()), 4)
         }
