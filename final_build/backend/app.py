@@ -49,9 +49,11 @@ from reportlab.pdfgen import canvas
 
 # Local imports
 from models import db, User, Role, UserRole, Video, DetectionEvent, Alert
-from ai_services.video_prediction_service import predict_video
+
 from ai_services.i3d_service import I3DService
 from ai_services.fusion_service import FusionService
+from ai_services.video_prediction_service import predict_video_from_frames
+from ai_services.preprocessing_service import extract_sampled_rgb_frames
 
 # =============================================================================
 # CONFIGURATION & SETUP
@@ -535,6 +537,7 @@ def classify_video() -> Tuple[Dict[str, Any], int]:
         )
         db.session.add(video)
         db.session.commit()
+        frames = extract_sampled_rgb_frames(file_path, num_frames=32, frame_size=224)
 
         # Validate AI services are available
         if i3d_service is None or fusion_service is None:
@@ -542,11 +545,11 @@ def classify_video() -> Tuple[Dict[str, Any], int]:
 
         # Run ViT prediction (frame-level analysis)
         logger.info(f"Running ViT prediction on {filename}")
-        vit_result = predict_video(file_path, frame_skip=30, max_frames=32)
+        vit_result = predict_video_from_frames(frames, max_frames=32)
 
         # Run I3D/R3D prediction (temporal analysis)
         logger.info(f"Running I3D prediction on {filename}")
-        i3d_result = i3d_service.predict_video(file_path)
+        i3d_result = i3d_service.predict_frames(frames)
 
         # Fuse predictions for final result
         logger.info(f"Fusing predictions for {filename}")
@@ -678,8 +681,10 @@ def classify_live_clip() -> Tuple[Dict[str, Any], int]:
             raise RuntimeError("AI services not initialized")
 
         # Run predictions with optimized parameters for live clips
-        vit_result = predict_video(file_path, frame_skip=15, max_frames=16)
-        i3d_result = i3d_service.predict_video(file_path)
+        frames = extract_sampled_rgb_frames(file_path, num_frames=32, frame_size=224)
+
+        vit_result = predict_video_from_frames(frames, max_frames=16)
+        i3d_result = i3d_service.predict_frames(frames)
         fusion_result = fusion_service.fuse_predictions(vit_result, i3d_result)
 
         final_label = fusion_result["final_label"]

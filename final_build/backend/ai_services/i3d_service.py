@@ -1,5 +1,3 @@
-# True I3D service for IntelliSight
-
 import os
 import json
 import cv2
@@ -42,36 +40,18 @@ class I3DService:
 
         print("[INFO] True I3D Model Loaded")
 
-    def load_video_frames(self, video_path, clip_len=32, frame_size=112):
-        cap = cv2.VideoCapture(video_path)
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        if total_frames <= 0:
-            cap.release()
-            return None
-
-        frame_indices = np.linspace(0, total_frames - 1, clip_len).astype(int)
+    def predict_frames(self, rgb_frames):
+        if len(rgb_frames) < 32:
+            return {
+                "label": "Unknown",
+                "confidence": 0.0
+            }
 
         frames = []
 
-        for frame_idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            success, frame = cap.read()
-
-            if not success:
-                continue
-
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = cv2.resize(frame, (frame_size, frame_size))
+        for frame in rgb_frames[:32]:
             frame = frame / 255.0
-
             frames.append(frame)
-
-        cap.release()
-
-        if len(frames) < clip_len:
-            return None
 
         frames = np.array(frames, dtype=np.float32)
 
@@ -79,18 +59,6 @@ class I3DService:
         frames = np.transpose(frames, (3, 0, 1, 2))
 
         frames = torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
-
-        return frames
-
-    def predict_video(self, video_path):
-        frames = self.load_video_frames(video_path)
-
-        if frames is None:
-            return {
-                "label": "Unknown",
-                "confidence": 0.0
-            }
-
         frames = frames.to(self.device)
 
         with torch.no_grad():

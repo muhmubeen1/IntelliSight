@@ -19,6 +19,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 class ViTService:
 
     def __init__(self):
+        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
 
         with open(CLASSES_PATH, "r") as file:
             class_map = json.load(file)
@@ -28,19 +29,23 @@ class ViTService:
             for index in range(len(class_map))
         ]
 
+        if isinstance(checkpoint, dict):
+            if "class_names" in checkpoint:
+                self.class_names = checkpoint["class_names"]
+
+            model_name = checkpoint.get("model_name", "vit_tiny_patch16_224")
+            state_dict = checkpoint["state_dict"]
+        else:
+            model_name = "vit_tiny_patch16_224"
+            state_dict = checkpoint
+
         self.model = timm.create_model(
-            "vit_base_patch16_224",
+            model_name,
             pretrained=False,
             num_classes=len(self.class_names)
         )
 
-        state_dict = torch.load(
-            MODEL_PATH,
-            map_location=DEVICE
-        )
-
         self.model.load_state_dict(state_dict)
-
         self.model.to(DEVICE)
         self.model.eval()
 
@@ -55,38 +60,25 @@ class ViTService:
 
         print("[INFO] ViT Model Loaded")
 
-    def predict_frame(self, frame):
-
-        image = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB
-        )
-
-        image = Image.fromarray(image)
+    def predict_rgb_frame(self, rgb_frame):
+        image = Image.fromarray(rgb_frame)
 
         image = self.transform(image)
         image = image.unsqueeze(0)
         image = image.to(DEVICE)
 
         with torch.no_grad():
-
             outputs = self.model(image)
+            probs = torch.softmax(outputs, dim=1)
+            confidence, predicted = torch.max(probs, dim=1)
 
-            probs = torch.softmax(
-                outputs,
-                dim=1
-            )
-
-            confidence, predicted = torch.max(
-                probs,
-                dim=1
-            )
-
-        label = self.class_names[
-            predicted.item()
-        ]
+        label = self.class_names[predicted.item()]
 
         return {
             "label": label,
             "confidence": round(confidence.item(), 4)
         }
+
+    def predict_frame(self, frame):
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return self.predict_rgb_frame(rgb_frame)
