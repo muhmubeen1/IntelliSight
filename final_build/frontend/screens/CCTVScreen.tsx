@@ -2,19 +2,7 @@
  * ============================================================
  * CCTVScreen.tsx — IntelliSight Live Surveillance Screen
  * ============================================================
- *
- * PURPOSE:
- *   Displays a live camera feed from one of three sources:
- *     1. Demo video  (local test.mp4 on the server)
- *     2. Mobile cam  (phone running IP Webcam app)
- *     3. IP camera   (real CCTV camera on the LAN)
- *
- *   Also shows real-time AI classification results overlaid
- *   on the video feed (anomaly detection from Python backend).
- *
- * UI DESIGN: unchanged from original
- * LOGIC:     rewritten for production reliability
- * ============================================================
+ * Fixed: Auto-stream on mount removed, proper details table added
  */
 
 import { Ionicons } from "@expo/vector-icons";
@@ -30,6 +18,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Vibration,
   View,
 } from "react-native";
 import Animated, {
@@ -46,90 +35,165 @@ import { CAMERAS } from "../config/streams";
 // ─────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────
-
-/** Python AI inference server */
 const API_URL = "http://192.168.100.12:5000";
-
-/** Node.js live stream server */
 const LIVE_SERVER_URL = "http://192.168.100.12:4000";
 
-// UI colors — unchanged from original
 const NEON_GREEN = "#10B952";
 const DARK_BG = "#050705";
 const MUTED_GREEN = "#8A9A8D";
 const ALERT_RED = "#ff3333";
+const ORANGE = "#FFA500";
 
 // ─────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────
-
-/**
- * StreamMode defines which camera source the user has selected.
- *
- *   local      → loop the demo video (test.mp4) stored on the server
- *   mobile-cam → connect to phone running IP Webcam app via HTTP MJPEG
- *   ip-camera  → connect to real CCTV camera via RTSP on the LAN
- */
 type StreamMode = "local" | "mobile-cam" | "ip-camera";
+type Severity = "High" | "Medium" | "Low";
+
+interface ClassificationResult {
+  result: string;
+  confidence: number;
+  timestamp: string;
+  alert_required: boolean;
+  severity: Severity;
+}
+
+interface PopupData {
+  show_popup: boolean;
+  title: string;
+  label: string;
+  confidence_percent: number;
+  severity: string;
+  timestamp: string;
+  beep_required: boolean;
+  message: string;
+}
+
+interface StreamDetails {
+  mode: StreamMode;
+  cameraName: string;
+  streamUrl: string;
+  connectedAt: string;
+  status: string;
+  duration: string;
+}
+
+interface DetectionHistoryItem {
+  id: string;
+  timestamp: string;
+  label: string;
+  confidence: number;
+  severity: Severity;
+  status: string;
+}
+
+// ─────────────────────────────────────────────────────────────
+// HELPER FUNCTIONS (outside component)
+// ─────────────────────────────────────────────────────────────
+
+const getStoredToken = async (): Promise<string | null> => {
+  try {
+    const AsyncStorage = (await import("@react-native-async-storage/async-storage")).default;
+    return await AsyncStorage.getItem("jwt_token");
+  } catch {
+    return null;
+  }
+};
+
+const playAlertBeep = (): void => {
+  try {
+    if (Platform.OS === "web") {
+      const AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContext) return;
+      const ctx = new AudioContext();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.5, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.5);
+    } else {
+      Vibration.vibrate([500, 200, 500]);
+    }
+  } catch {
+    // Silently fail
+  }
+};
+
+const formatConfidence = (confidence: number): string => {
+  if (typeof confidence !== "number" || isNaN(confidence)) return "0.0%";
+  return `${(confidence * 100).toFixed(1)}%`;
+};
+
+const getCurrentTimestamp = (): string => new Date().toISOString();
+
+const formatDuration = (startTime: string | null): string => {
+  if (!startTime) return "00:00:00";
+  const diff = Date.now() - new Date(startTime).getTime();
+  const hours = Math.floor(diff / 3600000);
+  const mins = Math.floor((diff % 3600000) / 60000);
+  const secs = Math.floor((diff % 60000) / 1000);
+  return `${hours.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+};
+
+const getSeverityColor = (severity: string): string => {
+  switch (severity) {
+    case "High": return ALERT_RED;
+    case "Medium": return ORANGE;
+    default: return NEON_GREEN;
+  }
+};
 
 // ─────────────────────────────────────────────────────────────
 // COMPONENT
 // ─────────────────────────────────────────────────────────────
 export default function CCTVScreen() {
-
-  // ── Camera node selection (the grid at the bottom) ─────────
+  // ── ALL useState hooks first ──────────────────────────────
   const [selectedCamera, setSelectedCamera] = useState(1);
-
-  // ── Loading / error state ───────────────────────────────────
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // ── Stream state ────────────────────────────────────────────
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamUrl, setStreamUrl] = useState(`${LIVE_SERVER_URL}/index.m3u8`);
-
-  // ── Modal (connect camera dialog) ──────────────────────────
+  const [streamDetails, setStreamDetails] = useState<StreamDetails | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
-
-  // ── Form fields inside the modal ───────────────────────────
+  const [detailsModalVisible, setDetailsModalVisible] = useState(false);
+  const [resultPopupVisible, setResultPopupVisible] = useState(false);
   const [cameraName, setCameraName] = useState("Main Entrance Camera");
-
-  /**
-   * mode: which source the user selected in the modal
-   * Defaults to "local" so demo works out of the box.
-   */
   const [mode, setMode] = useState<StreamMode>("local");
-
-  /**
-   * mobileStreamUrl: URL entered by the user for mobile-cam mode
-   * Example: http://192.168.100.21:8080/video
-   */
-  const [mobileStreamUrl, setMobileStreamUrl] = useState(
-    "http://192.168.100.21:8080/video"
-  );
-
-  /**
-   * ipAddress: camera IP entered by the user for ip-camera mode
-   * Example: 192.168.1.64
-   */
+  const [mobileStreamUrl, setMobileStreamUrl] = useState("http://192.168.100.21:8080/video");
   const [ipAddress, setIpAddress] = useState("");
   const [ipUsername, setIpUsername] = useState("admin");
   const [ipPassword, setIpPassword] = useState("");
+  const [classification, setClassification] = useState<ClassificationResult | null>(null);
+  const [popupData, setPopupData] = useState<PopupData | null>(null);
+  const [detectionHistory, setDetectionHistory] = useState<DetectionHistoryItem[]>([]);
+  const [streamDuration, setStreamDuration] = useState("00:00:00");
 
-  // ── AI classification result overlay ───────────────────────
-  const [classification, setClassification] = useState<{
-    result: string;
-    confidence: number;
-    timestamp: number;
-  } | null>(null);
-
-  // ── Video player refs ───────────────────────────────────────
+  // ── ALL useRef hooks ──────────────────────────────────────
+  const hasBeepedRef = useRef<boolean>(false);
+  const lastPopupTimestampRef = useRef<string | null>(null);
   const videoRef = useRef<Video>(null);
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
+  const classificationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const livePollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const authTokenRef = useRef<string | null>(null);
+  const streamStartTimeRef = useRef<string | null>(null);
 
-  // ── Pulse animation for the LIVE/OFFLINE dot ───────────────
+  // ── Reanimated hook ───────────────────────────────────────
   const pulseAnim = useSharedValue(1);
+  const animatedPulseStyle = useAnimatedStyle(() => ({
+    opacity: pulseAnim.value,
+  }));
 
+  // ── ALL useEffect hooks ───────────────────────────────────
+
+  // Effect 1: Pulse animation only
   useEffect(() => {
     pulseAnim.value = withRepeat(
       withTiming(0.2, { duration: 800, easing: Easing.inOut(Easing.ease) }),
@@ -138,51 +202,31 @@ export default function CCTVScreen() {
     );
   }, []);
 
-  const animatedPulseStyle = useAnimatedStyle(() => ({
-    opacity: pulseAnim.value,
-  }));
-
-  // ─────────────────────────────────────────────────────────────
-  // ON MOUNT: check server status
-  // Restores the streaming state if the app was reloaded while
-  // the server was already streaming.
-  // ─────────────────────────────────────────────────────────────
+  // Effect 2: Check server status on mount (NO AUTO-CONNECT)
   useEffect(() => {
-    checkStatus();
+    checkServerStatus();
+    return () => {
+      cleanupAllIntervals();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const checkStatus = async () => {
-    try {
-      const data = await getLiveStreamStatus();
-
-      setIsStreaming(data.isStreaming || false);
-
-      // Restore mode from server state
-      if (data.mode === "mobile-cam") setMode("mobile-cam");
-      else if (data.mode === "ip-camera") setMode("ip-camera");
-      else setMode("local");
-
-      if (data.streamUrl) {
-        // Replace localhost with actual server IP in case server
-        // returned a localhost URL (happens in some configs)
-        setStreamUrl(data.streamUrl.replace("localhost", "192.168.100.12"));
-      } else {
-        setStreamUrl(`${LIVE_SERVER_URL}/index.m3u8`);
-      }
-
-      setError(null);
-    } catch {
-      setIsStreaming(false);
-      setError("Live server not reachable.");
+  // Effect 3: Stream duration timer
+  useEffect(() => {
+    if (isStreaming && streamStartTimeRef.current) {
+      durationIntervalRef.current = setInterval(() => {
+        setStreamDuration(formatDuration(streamStartTimeRef.current));
+      }, 1000);
     }
-  };
+    return () => {
+      if (durationIntervalRef.current) {
+        clearInterval(durationIntervalRef.current);
+        durationIntervalRef.current = null;
+      }
+    };
+  }, [isStreaming]);
 
-  // ─────────────────────────────────────────────────────────────
-  // HLS PLAYER SETUP (web only)
-  // Sets up HLS.js when running on web platform.
-  // HLS.js handles the playlist polling and segment loading.
-  // On native (iOS/Android), expo-av handles HLS natively.
-  // ─────────────────────────────────────────────────────────────
+  // Effect 4: HLS player setup (web only)
   useEffect(() => {
     if (Platform.OS !== "web") return;
     if (!isStreaming || !streamUrl || !webVideoRef.current) return;
@@ -190,11 +234,7 @@ export default function CCTVScreen() {
     const video = webVideoRef.current;
 
     if (Hls.isSupported()) {
-      const hls = new Hls({
-        lowLatencyMode: true,
-        enableWorker: true,
-      });
-
+      const hls = new Hls({ lowLatencyMode: true, enableWorker: true });
       hls.loadSource(streamUrl);
       hls.attachMedia(video);
 
@@ -208,30 +248,23 @@ export default function CCTVScreen() {
       });
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (!data.fatal) return; // ignore non-fatal errors
-
+        if (!data.fatal) return;
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          // Network errors are often temporary — try to recover
           hls.startLoad();
           return;
         }
-
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
           hls.recoverMediaError();
           return;
         }
-
-        // Fatal unrecoverable error
         setError("NO SIGNAL: HLS playback failed.");
         setIsLoading(false);
         hls.destroy();
       });
 
-      // Cleanup HLS instance when component unmounts or stream changes
       return () => { hls.destroy(); };
     }
 
-    // Fallback for Safari — supports HLS natively
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = streamUrl;
       video.play()
@@ -243,76 +276,168 @@ export default function CCTVScreen() {
     }
   }, [isStreaming, streamUrl]);
 
-  // ─────────────────────────────────────────────────────────────
-  // waitForPlaylist
-  // After calling /connect, FFmpeg needs a few seconds to start
-  // generating HLS segments. This function polls the m3u8 URL
-  // until it responds with 200 OK, then the frontend starts playing.
-  //
-  // retries: how many times to check before giving up
-  // delay:   milliseconds between each check
-  // ─────────────────────────────────────────────────────────────
-  const waitForPlaylist = async (
-    url: string,
-    retries = 30,
-    delay = 1000
-  ): Promise<boolean> => {
+  // ── Helper functions ──────────────────────────────────────
+
+  const cleanupAllIntervals = () => {
+    if (classificationIntervalRef.current) {
+      clearInterval(classificationIntervalRef.current);
+      classificationIntervalRef.current = null;
+    }
+    if (livePollIntervalRef.current) {
+      clearInterval(livePollIntervalRef.current);
+      livePollIntervalRef.current = null;
+    }
+    if (durationIntervalRef.current) {
+      clearInterval(durationIntervalRef.current);
+      durationIntervalRef.current = null;
+    }
+  };
+
+  const checkServerStatus = async () => {
+    try {
+      const data = await getLiveStreamStatus();
+      // Only restore UI state, DO NOT auto-start stream
+      setIsStreaming(data.isStreaming || false);
+      if (data.mode === "mobile-cam") setMode("mobile-cam");
+      else if (data.mode === "ip-camera") setMode("ip-camera");
+      else setMode("local");
+
+      if (data.streamUrl) {
+        setStreamUrl(data.streamUrl.replace("localhost", "192.168.100.12"));
+      }
+      setError(null);
+    } catch {
+      // Server not reachable — this is normal on first load
+      setIsStreaming(false);
+      setError(null); // Don't show error on initial load
+    }
+  };
+
+  const waitForPlaylist = async (url: string, retries = 30, delay = 1000): Promise<boolean> => {
     for (let i = 0; i < retries; i++) {
       try {
-        // Add cache-busting param so browser doesn't cache 404 response
         const res = await fetch(`${url}?t=${Date.now()}`, { method: "GET" });
         if (res.ok) return true;
       } catch {
-        // Server not ready yet — keep waiting
+        // Server not ready yet
       }
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    return false; // Timed out
+    return false;
   };
 
-  // ─────────────────────────────────────────────────────────────
-  // handleConnectCamera
-  // Called when user taps CONNECT in the modal.
-  // Builds the correct request body based on the selected mode
-  // and sends it to the server's /connect endpoint.
-  // ─────────────────────────────────────────────────────────────
+  const startAutoDetection = async () => {
+    cleanupAllIntervals();
+    hasBeepedRef.current = false;
+    lastPopupTimestampRef.current = null;
+
+    const token = await getStoredToken();
+    authTokenRef.current = token;
+
+    console.log("[AUTO-DETECT] Starting automatic anomaly detection polling");
+
+    // Poll classification endpoint every 3 seconds
+    classificationIntervalRef.current = setInterval(async () => {
+      try {
+        const headers: Record<string, string> = {};
+        if (authTokenRef.current) headers["Authorization"] = `Bearer ${authTokenRef.current}`;
+
+        const response = await fetch(`${API_URL}/api/live-classification`, { headers });
+        if (!response.ok) return;
+
+        const data = await response.json();
+        if (data.success && data.data) {
+          const result: ClassificationResult = {
+            result: data.data.result || "NormalVideos",
+            confidence: data.data.confidence || 0,
+            timestamp: data.data.timestamp || getCurrentTimestamp(),
+            alert_required: data.data.alert_required || false,
+            severity: data.data.severity || "Low",
+          };
+          setClassification(result);
+
+          // Add to detection history if anomaly detected
+          if (result.alert_required) {
+            const historyItem: DetectionHistoryItem = {
+              id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+              timestamp: result.timestamp,
+              label: result.result,
+              confidence: result.confidence,
+              severity: result.severity,
+              status: "New",
+            };
+            setDetectionHistory(prev => [historyItem, ...prev].slice(0, 50));
+          }
+
+          if (data.popup_data && data.popup_data.show_popup) {
+            handleDetectionPopup(data.popup_data);
+          }
+        }
+      } catch (error) {
+        console.debug("[AUTO-DETECT] Polling error:", error);
+      }
+    }, 3000);
+
+    // Poll for high alert beep every 2 seconds
+    livePollIntervalRef.current = setInterval(async () => {
+      try {
+        const headers: Record<string, string> = {};
+        if (authTokenRef.current) headers["Authorization"] = `Bearer ${authTokenRef.current}`;
+
+        const response = await fetch(`${API_URL}/live-classification`, { headers });
+        if (!response.ok) return;
+
+        const data = await response.json();
+        if (data.popup_data?.beep_required && !hasBeepedRef.current) {
+          hasBeepedRef.current = true;
+          playAlertBeep();
+          console.log("[ALERT] High severity anomaly detected!");
+        }
+      } catch (error) {
+        console.debug("[LIVE-POLL] Error:", error);
+      }
+    }, 2000);
+  };
+
+  const handleDetectionPopup = (popupData: PopupData): void => {
+    if (lastPopupTimestampRef.current === popupData.timestamp) return;
+    lastPopupTimestampRef.current = popupData.timestamp;
+    setPopupData(popupData);
+    setResultPopupVisible(true);
+    console.log("[POPUP] Detection result:", popupData.label);
+
+    if (popupData.severity !== "High") {
+      setTimeout(() => setResultPopupVisible(false), 8000);
+    }
+  };
+
   const handleConnectCamera = async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      // ── Build request body based on selected mode ───────────
       let requestBody: Record<string, string> = { mode };
 
       if (mode === "mobile-cam") {
-        // Send the phone's stream URL
         if (!mobileStreamUrl.trim()) {
           throw new Error("Please enter the phone camera URL.");
         }
         requestBody.streamUrl = mobileStreamUrl.trim();
-
       } else if (mode === "ip-camera") {
-        // Send camera IP (server builds the RTSP URL)
-        // OR send a full RTSP URL directly if user entered one
         if (!ipAddress.trim()) {
           throw new Error("Please enter the camera IP address.");
         }
-
         if (ipAddress.startsWith("rtsp://")) {
-          // User entered a full RTSP URL
           requestBody.streamUrl = ipAddress.trim();
         } else {
-          // User entered just an IP — server will build the RTSP URL
           requestBody.ip = ipAddress.trim();
           requestBody.username = ipUsername.trim() || "admin";
           requestBody.password = ipPassword.trim();
         }
       }
-      // For "local" mode, no extra fields needed
 
-      console.log("[CONNECT] Sending request:", requestBody);
+      console.log("[CONNECT] Request:", requestBody);
 
-      // ── Call server /connect endpoint ───────────────────────
       const response = await fetch(`${LIVE_SERVER_URL}/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -326,14 +451,8 @@ export default function CCTVScreen() {
         throw new Error(data.message || "Camera connect failed.");
       }
 
-      // Close modal immediately — show loading state on video
       setModalVisible(false);
-
       const liveUrl = `${LIVE_SERVER_URL}/index.m3u8`;
-
-      // ── Wait for FFmpeg to generate the first HLS segments ──
-      // FFmpeg needs 2-4 seconds to start writing .ts files.
-      // We poll until the playlist file exists on the server.
       const playlistReady = await waitForPlaylist(liveUrl);
 
       if (!playlistReady) {
@@ -342,10 +461,28 @@ export default function CCTVScreen() {
         return;
       }
 
-      // Stream is ready — update URL with cache buster and start playback
       setStreamUrl(`${liveUrl}?t=${Date.now()}`);
       setIsStreaming(true);
       setError(null);
+
+      const now = getCurrentTimestamp();
+      streamStartTimeRef.current = now;
+      setStreamDuration("00:00:00");
+
+      setStreamDetails({
+        mode,
+        cameraName,
+        streamUrl: mode === "mobile-cam" ? mobileStreamUrl : mode === "ip-camera" ? ipAddress : "Demo Video",
+        connectedAt: now,
+        status: "Connected",
+        duration: "00:00:00",
+      });
+
+      // Clear history on new stream
+      setDetectionHistory([]);
+
+      // Start auto-detection
+      await startAutoDetection();
 
     } catch (err: any) {
       console.error("[CONNECT] Error:", err);
@@ -356,11 +493,6 @@ export default function CCTVScreen() {
     }
   };
 
-  // ─────────────────────────────────────────────────────────────
-  // disconnectCamera
-  // Stops the stream by calling /disconnect on the server.
-  // Also clears the video player on the frontend.
-  // ─────────────────────────────────────────────────────────────
   const disconnectCamera = async () => {
     try {
       setIsLoading(true);
@@ -368,21 +500,28 @@ export default function CCTVScreen() {
 
       await fetch(`${LIVE_SERVER_URL}/disconnect`, { method: "POST" });
 
-      // Clear native video player
       if (videoRef.current) {
         await videoRef.current.unloadAsync();
       }
-
-      // Clear web video player
       if (webVideoRef.current) {
         webVideoRef.current.pause();
         webVideoRef.current.removeAttribute("src");
         webVideoRef.current.load();
       }
 
+      cleanupAllIntervals();
       setIsStreaming(false);
+      setClassification(null);
+      setPopupData(null);
+      setStreamDetails(null);
+      setStreamDuration("00:00:00");
+      hasBeepedRef.current = false;
+      lastPopupTimestampRef.current = null;
+      streamStartTimeRef.current = null;
+      authTokenRef.current = null;
       setError("NO SIGNAL: Stream disconnected.");
 
+      console.log("[DISCONNECT] Cleanup completed");
     } catch (err: any) {
       setError(err?.toString() || "Failed to disconnect stream.");
     } finally {
@@ -390,51 +529,20 @@ export default function CCTVScreen() {
     }
   };
 
-  // ─────────────────────────────────────────────────────────────
-  // AI Classification polling
-  // Fetches the latest anomaly detection result from the Python
-  // backend every 2 seconds and shows it overlaid on the video.
-  // ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const fetchClassification = async () => {
-      try {
-        const response = await fetch(`${API_URL}/live-classification`);
-        const data = await response.json();
-        setClassification(data);
-      } catch {
-        // Silently ignore — AI server may not be running yet
-      }
-    };
-
-    fetchClassification();
-    const interval = setInterval(fetchClassification, 2000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const isAnomaly = classification && classification.result !== "NormalVideos";
-
-  // ─────────────────────────────────────────────────────────────
-  // switchCamera
-  // Switches the selected camera node in the grid.
-  // Only switches to active cameras.
-  // ─────────────────────────────────────────────────────────────
   const switchCamera = (cameraId: number) => {
     const camera = CAMERAS.find((cam) => cam.id === cameraId);
     if (!camera || !camera.active) return;
-
     setSelectedCamera(cameraId);
     setIsLoading(true);
     setError(null);
   };
 
-  // ─────────────────────────────────────────────────────────────
-  // RENDER
-  // UI is identical to the original design.
-  // ─────────────────────────────────────────────────────────────
+  // ── Derived state ─────────────────────────────────────────
+  const isAnomaly = classification && classification.result !== "NormalVideos";
+
+  // ── RENDER ────────────────────────────────────────────────
   return (
     <View style={styles.container}>
-
-      {/* ── Header ─────────────────────────────────────────── */}
       <View style={styles.header}>
         <Ionicons name="radio" size={32} color={NEON_GREEN} style={styles.neonGlow} />
         <Text style={styles.headerTitle}>LIVE SURVEILLANCE</Text>
@@ -442,8 +550,6 @@ export default function CCTVScreen() {
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 20 }}>
-
-        {/* ── Top action buttons ──────────────────────────── */}
         <View style={styles.topActionRow}>
           <TouchableOpacity
             style={styles.connectCameraButton}
@@ -459,10 +565,17 @@ export default function CCTVScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* ── Video player ────────────────────────────────── */}
-        <View style={[styles.videoWrapper, isAnomaly && { borderColor: ALERT_RED }]}>
+        <View style={[styles.videoWrapper, isAnomaly ? { borderColor: ALERT_RED } : {}]}>
+          {isStreaming && (
+            <TouchableOpacity
+              style={styles.detailsButton}
+              onPress={() => setDetailsModalVisible(true)}
+            >
+              <Ionicons name="information-circle" size={20} color={NEON_GREEN} />
+              <Text style={styles.detailsButtonText}>DETAILS</Text>
+            </TouchableOpacity>
+          )}
 
-          {/* Web platform: use <video> tag with HLS.js */}
           {isStreaming && Platform.OS === "web" && (
             <video
               ref={webVideoRef}
@@ -474,7 +587,6 @@ export default function CCTVScreen() {
             />
           )}
 
-          {/* Native platform: use expo-av Video component */}
           {isStreaming && Platform.OS !== "web" && (
             <Video
               ref={videoRef}
@@ -482,18 +594,9 @@ export default function CCTVScreen() {
               resizeMode={ResizeMode.COVER}
               shouldPlay
               isMuted
-              source={{
-                uri: streamUrl,
-                overrideFileExtensionAndroid: "m3u8",
-              }}
-              onError={() => {
-                setError("NO SIGNAL: Connection to node lost.");
-                setIsLoading(false);
-              }}
-              onLoad={() => {
-                setIsLoading(false);
-                setError(null);
-              }}
+              source={{ uri: streamUrl, overrideFileExtensionAndroid: "m3u8" }}
+              onError={() => { setError("NO SIGNAL: Connection to node lost."); setIsLoading(false); }}
+              onLoad={() => { setIsLoading(false); setError(null); }}
               onPlaybackStatusUpdate={(status: AVPlaybackStatus) => {
                 if (!status.isLoaded && status.error) {
                   setError(`FEED ERROR: ${status.error}`);
@@ -504,7 +607,6 @@ export default function CCTVScreen() {
             />
           )}
 
-          {/* Loading overlay */}
           {isLoading && !error && (
             <View style={styles.overlayCenter}>
               <ActivityIndicator size="large" color={NEON_GREEN} />
@@ -512,15 +614,14 @@ export default function CCTVScreen() {
             </View>
           )}
 
-          {/* No camera connected overlay */}
           {!isStreaming && !isLoading && (
             <View style={styles.overlayCenter}>
               <Ionicons name="videocam-off" size={42} color={MUTED_GREEN} />
               <Text style={styles.loadingText}>NO CAMERA CONNECTED</Text>
+              <Text style={styles.hintText}>Tap "CONNECT CAMERA" to start</Text>
             </View>
           )}
 
-          {/* Error overlay */}
           {error && (
             <View style={styles.overlayCenter}>
               <Ionicons name="warning-outline" size={40} color={ALERT_RED} />
@@ -528,10 +629,7 @@ export default function CCTVScreen() {
             </View>
           )}
 
-          {/* HUD overlays (LIVE dot, classification, brackets) */}
           <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
-
-            {/* LIVE / OFFLINE indicator */}
             <View style={styles.hudTopRight}>
               <Animated.View
                 style={[
@@ -543,35 +641,29 @@ export default function CCTVScreen() {
               <Text style={styles.hudText}>{isStreaming ? "LIVE" : "OFFLINE"}</Text>
             </View>
 
-            {/* AI classification result */}
             {classification && !error && !isLoading && isStreaming && (
               <View style={styles.hudBottomLeft}>
-                <Text style={[
-                  styles.classificationText,
-                  isAnomaly ? { color: ALERT_RED } : { color: NEON_GREEN },
-                ]}>
-                  {isAnomaly
-                    ? `⚠️ THREAT: ${classification.result.toUpperCase()}`
-                    : "SYSTEM CLEAR"}
+                <Text style={[styles.classificationText, isAnomaly ? { color: ALERT_RED } : { color: NEON_GREEN }]}>
+                  {isAnomaly ? `⚠️ THREAT: ${classification.result.toUpperCase()}` : "SYSTEM CLEAR"}
                 </Text>
                 <Text style={styles.confidenceText}>
-                  CONFIDENCE: {(classification.confidence * 100).toFixed(1)}%
+                  CONFIDENCE: {formatConfidence(classification.confidence)}
                 </Text>
+                {classification.severity === "High" && (
+                  <Text style={styles.highAlertBadge}>HIGH ALERT</Text>
+                )}
               </View>
             )}
 
-            {/* Corner brackets */}
-            <View style={[styles.bracket, styles.bracketTopLeft, isAnomaly && { borderColor: ALERT_RED }]} />
-            <View style={[styles.bracket, styles.bracketTopRight, isAnomaly && { borderColor: ALERT_RED }]} />
-            <View style={[styles.bracket, styles.bracketBottomLeft, isAnomaly && { borderColor: ALERT_RED }]} />
-            <View style={[styles.bracket, styles.bracketBottomRight, isAnomaly && { borderColor: ALERT_RED }]} />
+            <View style={[styles.bracket, styles.bracketTopLeft, isAnomaly ? { borderColor: ALERT_RED } : {}]} />
+            <View style={[styles.bracket, styles.bracketTopRight, isAnomaly ? { borderColor: ALERT_RED } : {}]} />
+            <View style={[styles.bracket, styles.bracketBottomLeft, isAnomaly ? { borderColor: ALERT_RED } : {}]} />
+            <View style={[styles.bracket, styles.bracketBottomRight, isAnomaly ? { borderColor: ALERT_RED } : {}]} />
           </View>
         </View>
 
-        {/* ── Camera node grid ────────────────────────────── */}
         <View style={styles.controlsContainer}>
           <Text style={styles.controlsTitle}>NETWORK NODES</Text>
-
           <View style={styles.buttonGrid}>
             {CAMERAS.map((camera) => {
               const isSelected = selectedCamera === camera.id;
@@ -606,17 +698,10 @@ export default function CCTVScreen() {
         </View>
       </ScrollView>
 
-      {/* ── Connect Camera Modal ─────────────────────────────── */}
-      <Modal
-        visible={modalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setModalVisible(false)}
-      >
+      {/* Connect Camera Modal */}
+      <Modal visible={modalVisible} transparent animationType="fade" onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalBox}>
-
-            {/* Modal header */}
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>CONNECT CAMERA</Text>
               <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}>
@@ -624,158 +709,244 @@ export default function CCTVScreen() {
               </TouchableOpacity>
             </View>
 
-            {/* Camera name input */}
             <Text style={styles.inputLabel}>CAMERA NAME</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Main Entrance Camera"
-              placeholderTextColor={MUTED_GREEN}
-              value={cameraName}
-              onChangeText={setCameraName}
-            />
+            <TextInput style={styles.input} placeholder="Main Entrance Camera" placeholderTextColor={MUTED_GREEN} value={cameraName} onChangeText={setCameraName} />
 
-            {/* Source type selector */}
             <Text style={styles.inputLabel}>SOURCE TYPE</Text>
-
             <View style={styles.modeRow}>
-
-              {/* Demo Video button */}
-              <TouchableOpacity
-                style={[styles.modeButton, mode === "local" && styles.activeModeButton]}
-                onPress={() => setMode("local")}
-              >
+              <TouchableOpacity style={[styles.modeButton, mode === "local" && styles.activeModeButton]} onPress={() => setMode("local")}>
                 <Ionicons name="film" size={20} color={mode === "local" ? "#000" : NEON_GREEN} />
-                <Text style={[styles.modeText, mode === "local" && styles.activeModeText]}>
-                  DEMO VIDEO
-                </Text>
+                <Text style={[styles.modeText, mode === "local" && styles.activeModeText]}>DEMO VIDEO</Text>
               </TouchableOpacity>
-
-              {/* Mobile Camera button */}
-              <TouchableOpacity
-                style={[styles.modeButton, mode === "mobile-cam" && styles.activeModeButton]}
-                onPress={() => setMode("mobile-cam")}
-              >
+              <TouchableOpacity style={[styles.modeButton, mode === "mobile-cam" && styles.activeModeButton]} onPress={() => setMode("mobile-cam")}>
                 <Ionicons name="phone-portrait" size={20} color={mode === "mobile-cam" ? "#000" : NEON_GREEN} />
-                <Text style={[styles.modeText, mode === "mobile-cam" && styles.activeModeText]}>
-                  MOBILE CAM
-                </Text>
+                <Text style={[styles.modeText, mode === "mobile-cam" && styles.activeModeText]}>MOBILE CAM</Text>
               </TouchableOpacity>
-
-              {/* IP Camera button */}
-              <TouchableOpacity
-                style={[styles.modeButton, mode === "ip-camera" && styles.activeModeButton]}
-                onPress={() => setMode("ip-camera")}
-              >
+              <TouchableOpacity style={[styles.modeButton, mode === "ip-camera" && styles.activeModeButton]} onPress={() => setMode("ip-camera")}>
                 <Ionicons name="camera" size={20} color={mode === "ip-camera" ? "#000" : NEON_GREEN} />
-                <Text style={[styles.modeText, mode === "ip-camera" && styles.activeModeText]}>
-                  IP CAMERA
-                </Text>
+                <Text style={[styles.modeText, mode === "ip-camera" && styles.activeModeText]}>IP CAMERA</Text>
               </TouchableOpacity>
-
             </View>
 
-            {/* ── Mobile cam fields ───────────────────────── */}
             {mode === "mobile-cam" && (
               <>
                 <Text style={styles.inputLabel}>PHONE STREAM URL</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="http://192.168.100.21:8080/video"
-                  placeholderTextColor={MUTED_GREEN}
-                  value={mobileStreamUrl}
-                  onChangeText={setMobileStreamUrl}
-                  autoCapitalize="none"
-                  keyboardType="url"
-                />
-                <Text style={styles.hintText}>
-                  Install IP Webcam app → Start Server → copy the URL shown
-                </Text>
+                <TextInput style={styles.input} placeholder="http://192.168.100.21:8080/video" placeholderTextColor={MUTED_GREEN} value={mobileStreamUrl} onChangeText={setMobileStreamUrl} autoCapitalize="none" keyboardType="url" />
+                <Text style={styles.hintText}>Install IP Webcam app → Start Server → copy the URL shown</Text>
               </>
             )}
 
-            {/* ── IP camera fields ────────────────────────── */}
             {mode === "ip-camera" && (
               <>
                 <Text style={styles.inputLabel}>CAMERA IP ADDRESS</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="192.168.1.64  or  rtsp://admin:pass@IP:554/stream"
-                  placeholderTextColor={MUTED_GREEN}
-                  value={ipAddress}
-                  onChangeText={setIpAddress}
-                  autoCapitalize="none"
-                  keyboardType="url"
-                />
-
+                <TextInput style={styles.input} placeholder="192.168.1.64 or rtsp://admin:pass@IP:554/stream" placeholderTextColor={MUTED_GREEN} value={ipAddress} onChangeText={setIpAddress} autoCapitalize="none" keyboardType="url" />
                 <View style={styles.credentialsRow}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.inputLabel}>USERNAME</Text>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="admin"
-                      placeholderTextColor={MUTED_GREEN}
-                      value={ipUsername}
-                      onChangeText={setIpUsername}
-                      autoCapitalize="none"
-                    />
+                    <TextInput style={styles.input} placeholder="admin" placeholderTextColor={MUTED_GREEN} value={ipUsername} onChangeText={setIpUsername} autoCapitalize="none" />
                   </View>
-
                   <View style={{ width: 10 }} />
-
                   <View style={{ flex: 1 }}>
                     <Text style={styles.inputLabel}>PASSWORD</Text>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="••••••••"
-                      placeholderTextColor={MUTED_GREEN}
-                      value={ipPassword}
-                      onChangeText={setIpPassword}
-                      secureTextEntry
-                    />
+                    <TextInput style={styles.input} placeholder="••••••••" placeholderTextColor={MUTED_GREEN} value={ipPassword} onChangeText={setIpPassword} secureTextEntry />
                   </View>
                 </View>
-
-                <Text style={styles.hintText}>
-                  Connect camera to the same router as this device via LAN cable or Wi-Fi
-                </Text>
+                <Text style={styles.hintText}>Connect camera to the same router via LAN or Wi-Fi</Text>
               </>
             )}
 
-            {/* ── Modal action buttons ─────────────────────── */}
             <View style={styles.modalButtonRow}>
-              <TouchableOpacity
-                style={styles.backButton}
-                onPress={() => setModalVisible(false)}
-              >
+              <TouchableOpacity style={styles.backButton} onPress={() => setModalVisible(false)}>
                 <Ionicons name="arrow-back" size={18} color={MUTED_GREEN} />
                 <Text style={styles.backButtonText}>BACK</Text>
               </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.modalConnectButton}
-                onPress={handleConnectCamera}
-                disabled={isLoading}
-              >
-                {isLoading ? (
-                  <ActivityIndicator color="#000" />
-                ) : (
-                  <>
-                    <Ionicons name="play" size={18} color="#000" />
-                    <Text style={styles.modalConnectText}>CONNECT</Text>
-                  </>
+              <TouchableOpacity style={styles.modalConnectButton} onPress={handleConnectCamera} disabled={isLoading}>
+                {isLoading ? <ActivityIndicator color="#000" /> : (
+                  <><Ionicons name="play" size={18} color="#000" /><Text style={styles.modalConnectText}>CONNECT</Text></>
                 )}
               </TouchableOpacity>
             </View>
-
           </View>
         </View>
       </Modal>
+
+      {/* Details Modal with Table */}
+      <Modal visible={detailsModalVisible} transparent animationType="fade" onRequestClose={() => setDetailsModalVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <ScrollView style={styles.detailsScrollView} contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+            <View style={styles.detailsModalBox}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>STREAM DETAILS</Text>
+                <TouchableOpacity onPress={() => setDetailsModalVisible(false)}>
+                  <Ionicons name="close" size={24} color={ALERT_RED} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Stream Info Table */}
+              <View style={styles.tableSection}>
+                <Text style={styles.tableTitle}>STREAM INFORMATION</Text>
+                <View style={styles.table}>
+                  <TableRow label="Camera Name" value={streamDetails?.cameraName || "—"} />
+                  <TableRow label="Mode" value={streamDetails?.mode?.toUpperCase() || "—"} />
+                  <TableRow label="Stream URL" value={streamDetails?.streamUrl || "—"} isMonospace />
+                  <TableRow label="Connected At" value={streamDetails?.connectedAt ? new Date(streamDetails.connectedAt).toLocaleString() : "—"} />
+                  <TableRow label="Duration" value={streamDuration} isStatus />
+                  <TableRow label="Status" value={isStreaming ? "🟢 LIVE" : "🔴 OFFLINE"} isStatus />
+                </View>
+              </View>
+
+              {/* Detection History Table */}
+              <View style={styles.tableSection}>
+                <Text style={styles.tableTitle}>DETECTION HISTORY</Text>
+                {detectionHistory.length === 0 ? (
+                  <Text style={styles.noDataText}>No anomalies detected yet</Text>
+                ) : (
+                  <View style={styles.detectionTable}>
+                    {/* Table Header */}
+                    <View style={styles.detectionTableHeader}>
+                      <Text style={[styles.detectionHeaderCell, { flex: 2 }]}>TIME</Text>
+                      <Text style={[styles.detectionHeaderCell, { flex: 2 }]}>ANOMALY</Text>
+                      <Text style={[styles.detectionHeaderCell, { flex: 1.5 }]}>CONF</Text>
+                      <Text style={[styles.detectionHeaderCell, { flex: 1.5 }]}>SEV</Text>
+                      <Text style={[styles.detectionHeaderCell, { flex: 1 }]}>STATUS</Text>
+                    </View>
+                    {/* Table Rows */}
+                    {detectionHistory.map((item) => (
+                      <View key={item.id} style={styles.detectionTableRow}>
+                        <Text style={[styles.detectionCell, { flex: 2, color: MUTED_GREEN, fontSize: 10 }]}>
+                          {new Date(item.timestamp).toLocaleTimeString()}
+                        </Text>
+                        <Text style={[styles.detectionCell, { flex: 2, color: "#fff", fontWeight: "bold" }]}>
+                          {item.label}
+                        </Text>
+                        <Text style={[styles.detectionCell, { flex: 1.5, color: NEON_GREEN }]}>
+                          {formatConfidence(item.confidence)}
+                        </Text>
+                        <View style={[styles.severityCell, { flex: 1.5, backgroundColor: `${getSeverityColor(item.severity)}33` }]}>
+                          <Text style={[styles.severityCellText, { color: getSeverityColor(item.severity) }]}>
+                            {item.severity}
+                          </Text>
+                        </View>
+                        <View style={[styles.statusCell, { flex: 1 }]}>
+                          <View style={[styles.statusDot, { backgroundColor: item.status === "New" ? ALERT_RED : NEON_GREEN }]} />
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+
+              {/* Current Classification */}
+              {classification && (
+                <View style={styles.tableSection}>
+                  <Text style={styles.tableTitle}>CURRENT DETECTION</Text>
+                  <View style={styles.currentDetectionCard}>
+                    <View style={styles.currentDetectionRow}>
+                      <Text style={styles.currentDetectionLabel}>Label:</Text>
+                      <Text style={[styles.currentDetectionValue, { color: classification.result !== "NormalVideos" ? ALERT_RED : NEON_GREEN }]}>
+                        {classification.result}
+                      </Text>
+                    </View>
+                    <View style={styles.currentDetectionRow}>
+                      <Text style={styles.currentDetectionLabel}>Confidence:</Text>
+                      <Text style={styles.currentDetectionValue}>{formatConfidence(classification.confidence)}</Text>
+                    </View>
+                    <View style={styles.currentDetectionRow}>
+                      <Text style={styles.currentDetectionLabel}>Severity:</Text>
+                      <View style={[styles.severityBadgeInline, { backgroundColor: `${getSeverityColor(classification.severity)}33` }]}>
+                        <Text style={[styles.severityBadgeText, { color: getSeverityColor(classification.severity) }]}>
+                          {classification.severity}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.currentDetectionRow}>
+                      <Text style={styles.currentDetectionLabel}>Alert:</Text>
+                      <Text style={[styles.currentDetectionValue, { color: classification.alert_required ? ALERT_RED : MUTED_GREEN }]}>
+                        {classification.alert_required ? "⚠️ REQUIRED" : "None"}
+                      </Text>
+                    </View>
+                    <View style={styles.currentDetectionRow}>
+                      <Text style={styles.currentDetectionLabel}>Last Update:</Text>
+                      <Text style={[styles.currentDetectionValue, { fontSize: 10, color: MUTED_GREEN }]}>
+                        {new Date(classification.timestamp).toLocaleString()}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+
+              <TouchableOpacity style={styles.closeDetailsButton} onPress={() => setDetailsModalVisible(false)}>
+                <Text style={styles.closeDetailsText}>CLOSE</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </View>
+      </Modal>
+
+      {/* Result Popup Modal */}
+      {popupData && (
+        <Modal visible={resultPopupVisible} transparent animationType="slide" onRequestClose={() => setResultPopupVisible(false)}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.resultModalBox, popupData.severity === "High" ? { borderColor: ALERT_RED, borderWidth: 2 } : {}]}>
+              <View style={styles.popupIconContainer}>
+                <Ionicons name={popupData.severity === "High" ? "warning" : "alert-circle"} size={48} color={popupData.severity === "High" ? ALERT_RED : NEON_GREEN} />
+              </View>
+              <Text style={[styles.popupTitle, popupData.severity === "High" ? { color: ALERT_RED } : {}]}>{popupData.title}</Text>
+              <Text style={styles.popupLabel}>{popupData.label}</Text>
+              <View style={styles.confidenceBar}>
+                <View style={[styles.confidenceFill, { width: `${popupData.confidence_percent}%`, backgroundColor: popupData.severity === "High" ? ALERT_RED : NEON_GREEN }]} />
+              </View>
+              <Text style={styles.popupConfidenceText}>Confidence: {popupData.confidence_percent}%</Text>
+              <View style={[styles.severityBadgePopup, { backgroundColor: `${getSeverityColor(popupData.severity)}33` }]}>
+                <Text style={[styles.severityText, { color: getSeverityColor(popupData.severity) }]}>
+                  SEVERITY: {popupData.severity.toUpperCase()}
+                </Text>
+              </View>
+              <Text style={styles.popupTimestamp}>{new Date(popupData.timestamp).toLocaleString()}</Text>
+              <Text style={styles.popupMessage}>{popupData.message}</Text>
+              <View style={styles.popupButtonRow}>
+                <TouchableOpacity style={styles.dismissButton} onPress={() => setResultPopupVisible(false)}>
+                  <Text style={styles.dismissButtonText}>DISMISS</Text>
+                </TouchableOpacity>
+                {popupData.severity === "High" && (
+                  <TouchableOpacity style={styles.acknowledgeButton} onPress={() => { setResultPopupVisible(false); hasBeepedRef.current = false; }}>
+                    <Text style={styles.acknowledgeButtonText}>ACKNOWLEDGE</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
     </View>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-// STYLES — identical to original, with additions for new fields
+// SUB-COMPONENTS
+// ─────────────────────────────────────────────────────────────
+function TableRow({ label, value, isMonospace = false, isStatus = false }: {
+  label: string;
+  value: string;
+  isMonospace?: boolean;
+  isStatus?: boolean;
+}): React.ReactElement {
+  return (
+    <View style={styles.tableRow}>
+      <Text style={styles.tableRowLabel}>{label}</Text>
+      <Text style={[
+        styles.tableRowValue,
+        isMonospace && { fontFamily: Platform.OS === "ios" ? "Courier" : "monospace", fontSize: 10 },
+        isStatus && { color: NEON_GREEN, fontWeight: "900" },
+      ]}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// STYLES
 // ─────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: DARK_BG },
@@ -832,6 +1003,28 @@ const styles = StyleSheet.create({
   },
   stopButtonText: { color: ALERT_RED, fontWeight: "900" },
 
+  detailsButton: {
+    position: "absolute",
+    top: 45,
+    right: 15,
+    zIndex: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.7)",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 82, 0.4)",
+  },
+  detailsButtonText: {
+    color: NEON_GREEN,
+    fontSize: 10,
+    fontWeight: "900",
+    marginLeft: 4,
+    letterSpacing: 1,
+  },
+
   videoWrapper: {
     width: "100%",
     height: 250,
@@ -857,6 +1050,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     letterSpacing: 2,
     fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+  },
+  modalHintText: {
+    color: MUTED_GREEN,
+    fontSize: 11,
+    marginTop: -10,
+    marginBottom: 16,
+    letterSpacing: 0.5,
   },
   errorText: {
     color: ALERT_RED,
@@ -903,6 +1103,18 @@ const styles = StyleSheet.create({
     fontSize: 10,
     marginTop: 4,
     fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+  },
+  highAlertBadge: {
+    color: ALERT_RED,
+    fontSize: 10,
+    fontWeight: "900",
+    marginTop: 4,
+    letterSpacing: 1,
+    backgroundColor: "rgba(255, 51, 51, 0.2)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignSelf: "flex-start",
   },
 
   bracket: {
@@ -961,7 +1173,6 @@ const styles = StyleSheet.create({
   },
   inactiveButtonText: { color: MUTED_GREEN },
 
-  // Modal styles
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.85)",
@@ -1001,7 +1212,6 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
 
-  // Hint text below input fields
   hintText: {
     color: MUTED_GREEN,
     fontSize: 11,
@@ -1010,7 +1220,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
-  // Username + password side by side
   credentialsRow: { flexDirection: "row" },
 
   modeRow: { flexDirection: "row", gap: 8, marginBottom: 16 },
@@ -1050,4 +1259,277 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   modalConnectText: { color: "#000", fontWeight: "900" },
+
+  // ── Details Modal Styles ──────────────────────────────────
+  detailsScrollView: {
+    flex: 1,
+  },
+  detailsModalBox: {
+    backgroundColor: "#07110a",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(16,185,82,0.5)",
+    padding: 20,
+  },
+
+  // Table Section
+  tableSection: {
+    marginBottom: 20,
+  },
+  tableTitle: {
+    color: NEON_GREEN,
+    fontSize: 12,
+    fontWeight: "900",
+    letterSpacing: 2,
+    marginBottom: 10,
+  },
+
+  // Info Table
+  table: {
+    backgroundColor: "rgba(16, 185, 82, 0.03)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 82, 0.15)",
+    overflow: "hidden",
+  },
+  tableRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(16, 185, 82, 0.08)",
+  },
+  tableRowLabel: {
+    color: MUTED_GREEN,
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 1,
+    flex: 1,
+  },
+  tableRowValue: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "bold",
+    flex: 2,
+    textAlign: "right",
+  },
+
+  // Detection History Table
+  detectionTable: {
+    backgroundColor: "rgba(16, 185, 82, 0.03)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 82, 0.15)",
+    overflow: "hidden",
+  },
+  detectionTableHeader: {
+    flexDirection: "row",
+    backgroundColor: "rgba(16, 185, 82, 0.1)",
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(16, 185, 82, 0.2)",
+  },
+  detectionHeaderCell: {
+    color: NEON_GREEN,
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+    textAlign: "center",
+  },
+  detectionTableRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(16, 185, 82, 0.05)",
+  },
+  detectionCell: {
+    fontSize: 10,
+    textAlign: "center",
+  },
+  severityCell: {
+    borderRadius: 4,
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  severityCellText: {
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  statusCell: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  noDataText: {
+    color: MUTED_GREEN,
+    textAlign: "center",
+    paddingVertical: 20,
+    fontSize: 13,
+  },
+
+  // Current Detection Card
+  currentDetectionCard: {
+    backgroundColor: "rgba(16, 185, 82, 0.05)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 82, 0.2)",
+    padding: 14,
+  },
+  currentDetectionRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(16, 185, 82, 0.08)",
+  },
+  currentDetectionLabel: {
+    color: MUTED_GREEN,
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 1,
+  },
+  currentDetectionValue: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "bold",
+  },
+  severityBadgeInline: {
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  severityBadgeText: {
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+
+  closeDetailsButton: {
+    backgroundColor: "rgba(16, 185, 82, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 82, 0.4)",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  closeDetailsText: {
+    color: NEON_GREEN,
+    fontWeight: "900",
+    letterSpacing: 1,
+  },
+
+  // ── Result Popup Styles ───────────────────────────────────
+  resultModalBox: {
+    backgroundColor: "#07110a",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(16,185,82,0.5)",
+    padding: 24,
+    alignItems: "center",
+    width: "90%",
+    maxWidth: 400,
+    alignSelf: "center",
+  },
+  popupIconContainer: { marginBottom: 16 },
+  popupTitle: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "900",
+    letterSpacing: 2,
+    marginBottom: 12,
+    textAlign: "center",
+  },
+  popupLabel: {
+    color: "#fff",
+    fontSize: 24,
+    fontWeight: "900",
+    marginBottom: 16,
+    textAlign: "center",
+  },
+  confidenceBar: {
+    width: "100%",
+    height: 8,
+    backgroundColor: "rgba(255,255,255,0.1)",
+    borderRadius: 4,
+    marginBottom: 8,
+    overflow: "hidden",
+  },
+  confidenceFill: {
+    height: "100%",
+    borderRadius: 4,
+  },
+  popupConfidenceText: {
+    color: MUTED_GREEN,
+    fontSize: 12,
+    marginBottom: 12,
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+  },
+  severityBadgePopup: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 20,
+    marginBottom: 12,
+  },
+  severityText: {
+    fontSize: 12,
+    fontWeight: "900",
+    letterSpacing: 1,
+  },
+  popupTimestamp: {
+    color: MUTED_GREEN,
+    fontSize: 11,
+    marginBottom: 12,
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+  },
+  popupMessage: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 13,
+    textAlign: "center",
+    marginBottom: 20,
+    lineHeight: 18,
+  },
+  popupButtonRow: {
+    flexDirection: "row",
+    gap: 12,
+    width: "100%",
+  },
+  dismissButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "rgba(138,154,141,0.4)",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  dismissButtonText: {
+    color: MUTED_GREEN,
+    fontWeight: "900",
+    letterSpacing: 1,
+  },
+  acknowledgeButton: {
+    flex: 1,
+    backgroundColor: ALERT_RED,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  acknowledgeButtonText: {
+    color: "#fff",
+    fontWeight: "900",
+    letterSpacing: 1,
+  },
 });

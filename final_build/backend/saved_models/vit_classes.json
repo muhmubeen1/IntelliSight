@@ -1,1 +1,7 @@
-["Abuse", "Fighting", "NormalVideos", "RoadAccidents", "Robbery"]
+{
+    "0": "NormalVideos",
+    "1": "Fighting",
+    "2": "Shooting",
+    "3": "RoadAccidents",
+    "4": "Burglary"
+}

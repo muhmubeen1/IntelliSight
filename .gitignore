@@ -1,9 +1,44 @@
-node_modules/
-.env
-__pycache__/
+# Python
+**/__pycache__/
 *.pyc
+*.pyo
+*.log
+
+# Python virtual environments
+.venv/
 venv/
-backend/uploads/
-dist/
-build/
+
+# Environment files
+.env
+.env.*
+
+# Node
+node_modules/
+
+# AI Models
+final_build/backend/saved_models/*.pth
+final_build/backend/saved_models/*.pt
+final_build/backend/saved_models/*.onnx
+
+# Keep JSON class mappings
+!final_build/backend/saved_models/*.json
+
+# Live server generated videos
+final_build/live-server/videos/
+
+# Backend logs
+final_build/backend/intellisight.log
+
+# Generated live clips
+final_build/backend/live_clips/
+
+# Test files
+final_build/backend/test*.py
+final_build/backend/test*.mp4
+
+# VS Code
 .vscode/
+
+# OS
+.DS_Store
+Thumbs.db
