@@ -42,7 +42,7 @@ class I3DService:
 
         print("[INFO] True I3D Model Loaded")
 
-    def load_video_frames(self, video_path, clip_len=32, frame_size=224):
+    def load_video_frames(self, video_path, clip_len=32, frame_size=112):
         cap = cv2.VideoCapture(video_path)
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))

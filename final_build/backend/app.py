@@ -46,12 +46,6 @@ from dotenv import load_dotenv
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-# AI/ML imports
-import tensorflow as tf
-from tensorflow.keras.utils import img_to_array
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input, MobileNetV2
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D
 
 # Local imports
 from models import db, User, Role, UserRole, Video, DetectionEvent, Alert
@@ -154,27 +148,7 @@ except Exception as e:
     i3d_service = None
     fusion_service = None
 
-# =============================================================================
-# MODEL LOADING (Legacy MobileNetV2 for frame-level classification)
-# =============================================================================
 
-# This model is used for the background live stream processor
-# It processes individual frames from HLS segments
-try:
-    base_model = MobileNetV2(
-        weights="imagenet", 
-        include_top=False, 
-        input_shape=(224, 224, 3)
-    )
-    legacy_model = Sequential([
-        base_model,
-        GlobalAveragePooling2D(),
-        Dense(1, activation="sigmoid")
-    ])
-    logger.info("Legacy MobileNetV2 model loaded successfully")
-except Exception as e:
-    logger.error(f"Failed to load legacy model: {str(e)}")
-    legacy_model = None
 
 # =============================================================================
 # CLASS DEFINITIONS
@@ -208,10 +182,7 @@ latest_live_classification: Dict[str, Any] = {
     "severity": "Low"
 }
 
-# Background processor configuration
-FRAME_PROCESS_INTERVAL = 2  # Seconds between frame processing cycles
-BACKGROUND_THREAD: Optional[threading.Thread] = None
-BACKGROUND_RUNNING = threading.Event()
+
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -227,31 +198,7 @@ def get_current_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def preprocess_frame(frame: np.ndarray) -> np.ndarray:
-    """
-    Preprocess a video frame for model prediction.
 
-    Args:
-        frame: Raw OpenCV frame (BGR format)
-
-    Returns:
-        np.ndarray: Preprocessed frame array ready for model input
-
-    Raises:
-        ValueError: If frame is None or invalid
-    """
-    if frame is None or frame.size == 0:
-        raise ValueError("Invalid frame provided for preprocessing")
-
-    # Resize to model input size
-    resized = cv2.resize(frame, (64, 64))
-
-    # Convert to array and add batch dimension
-    img_array = img_to_array(resized)
-    img_array = np.expand_dims(img_array, axis=0)
-
-    # Apply MobileNetV2 preprocessing
-    return preprocess_input(img_array)
 
 
 def determine_severity(confidence: float, anomaly_type: str) -> str:
@@ -311,191 +258,9 @@ def cleanup_temp_files(directory: str, max_age_hours: int = 24) -> None:
         logger.error(f"Error during temp file cleanup: {str(e)}")
 
 
-# =============================================================================
-# BACKGROUND LIVE STREAM PROCESSOR
-# =============================================================================
-
-def process_latest_hls_frame() -> Optional[Dict[str, Any]]:
-    """
-    Process the latest HLS segment for anomaly detection.
-
-    This function reads the most recent .ts segment from the HLS stream,
-    extracts the last frame, and runs it through the legacy model.
-
-    Returns:
-        Optional[Dict]: Classification result with result, confidence, timestamp
-        None: If no segments available or processing fails
-    """
-    try:
-        # Validate HLS segments directory exists
-        if not os.path.exists(HLS_SEGMENTS_DIR):
-            logger.debug(f"HLS segments directory not found: {HLS_SEGMENTS_DIR}")
-            return None
-
-        # Get all .ts (MPEG-TS) segment files
-        ts_files = [
-            f for f in os.listdir(HLS_SEGMENTS_DIR) 
-            if f.endswith('.ts')
-        ]
-
-        if not ts_files:
-            logger.debug("No .ts segments found in HLS directory")
-            return None
-
-        # Find the most recently created segment
-        latest_ts = max(
-            ts_files, 
-            key=lambda x: os.path.getctime(
-                os.path.join(HLS_SEGMENTS_DIR, x)
-            )
-        )
-        ts_path = os.path.join(HLS_SEGMENTS_DIR, latest_ts)
-
-        # Open the video segment with OpenCV
-        cap = cv2.VideoCapture(ts_path)
-        if not cap.isOpened():
-            logger.warning(f"Could not open segment: {ts_path}")
-            return None
-
-        # Read all frames and keep the last one (most recent)
-        last_frame = None
-        frame_count = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            last_frame = frame
-            frame_count += 1
-
-        cap.release()
-
-        if last_frame is None:
-            logger.warning(f"No frames extracted from segment: {latest_ts}")
-            return None
-
-        # Preprocess and predict
-        processed_frame = preprocess_frame(last_frame)
-
-        if legacy_model is None:
-            logger.error("Legacy model not available for prediction")
-            return None
-
-        prediction = legacy_model.predict(processed_frame, verbose=0)
-
-        # Handle single-output vs multi-output model
-        if prediction.shape[1] == 1:
-            # Binary classification fallback
-            confidence = float(prediction[0][0])
-            predicted_class = "NormalVideos" if confidence < 0.5 else "Fighting"
-            confidence = confidence if confidence >= 0.5 else 1.0 - confidence
-        else:
-            predicted_class_idx = int(np.argmax(prediction, axis=1)[0])
-            confidence = float(prediction[0][predicted_class_idx])
-            predicted_class = ANOMALY_CLASSES[predicted_class_idx] if predicted_class_idx < len(ANOMALY_CLASSES) else "Unknown"
-
-        result = {
-            'result': predicted_class,
-            'confidence': confidence,
-            'timestamp': get_current_timestamp()
-        }
-
-        logger.debug(
-            f"Frame processed: {predicted_class} ({confidence:.2f}) "
-            f"from {frame_count} frames in {latest_ts}"
-        )
-        return result
-
-    except Exception as e:
-        logger.error(f"Error processing HLS frame: {str(e)}\n{traceback.format_exc()}")
-        return None
 
 
-def background_processor() -> None:
-    """
-    Background thread for continuous live stream monitoring.
 
-    This daemon thread runs indefinitely, periodically checking the HLS
-    segments directory and updating the latest classification state.
-    It can be gracefully stopped via the BACKGROUND_RUNNING event.
-    """
-    logger.info("Background processor started")
-
-    while BACKGROUND_RUNNING.is_set():
-        try:
-            result = process_latest_hls_frame()
-
-            if result:
-                # Determine if this is an alert-worthy detection
-                alert_required = is_alert_required(
-                    result['result'], 
-                    result['confidence']
-                )
-                severity = determine_severity(
-                    result['result'], 
-                    result['confidence']
-                )
-
-                # Thread-safe update of global state
-                with classification_lock:
-                    global latest_live_classification
-                    latest_live_classification = {
-                        "result": result['result'],
-                        "confidence": result['confidence'],
-                        "timestamp": result['timestamp'],
-                        "alert_required": alert_required,
-                        "severity": severity
-                    }
-
-                if alert_required:
-                    logger.warning(
-                        f"ALERT DETECTED: {result['result']} "
-                        f"({result['confidence']:.2f}) - Severity: {severity}"
-                    )
-                else:
-                    logger.info(
-                        f"Classification: {result['result']} "
-                        f"({result['confidence']:.2f})"
-                    )
-
-        except Exception as e:
-            logger.error(f"Background processor error: {str(e)}\n{traceback.format_exc()}")
-
-        # Wait before next processing cycle
-        time.sleep(FRAME_PROCESS_INTERVAL)
-
-    logger.info("Background processor stopped")
-
-
-def start_background_processor() -> None:
-    """
-    Start the background HLS processing thread if not already running.
-    """
-    global BACKGROUND_THREAD
-
-    if BACKGROUND_THREAD is not None and BACKGROUND_THREAD.is_alive():
-        logger.info("Background processor already running")
-        return
-
-    BACKGROUND_RUNNING.set()
-    BACKGROUND_THREAD = threading.Thread(
-        target=background_processor, 
-        daemon=True,
-        name="HLSBackgroundProcessor"
-    )
-    BACKGROUND_THREAD.start()
-    logger.info("Background processor thread started")
-
-
-def stop_background_processor() -> None:
-    """
-    Signal the background processor to stop gracefully.
-    """
-    BACKGROUND_RUNNING.clear()
-    logger.info("Background processor stop signal sent")
-
-
-# Start background processor on application startup
-start_background_processor()
 
 
 # =============================================================================
