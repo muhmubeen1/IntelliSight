@@ -39,6 +39,7 @@ export default function DashboardScreen() {
 
   const [analysisData, setAnalysisData] = useState<any>(null);
   const [showResultModal, setShowResultModal] = useState(false);
+  const [logSavedMessage, setLogSavedMessage] = useState<string>('');
 
   const scanAnim = useSharedValue(0);
   const pulseAnim = useSharedValue(1);
@@ -134,6 +135,7 @@ export default function DashboardScreen() {
   const handleClassification = async (file: ImagePicker.ImagePickerAsset) => {
     setIsLoading(true);
     setClassificationResult('');
+    setLogSavedMessage('');
 
     try {
       const token = await getToken();
@@ -148,48 +150,45 @@ export default function DashboardScreen() {
 
       const formData = new FormData();
 
-      // Get a safe filename for both Expo Web and native mobile.
       const name =
         file.fileName ||
         file.uri.split('/').pop() ||
         (file.type === 'video' ? 'upload.mp4' : 'upload.jpg');
 
-      /*
-        IMPORTANT:
-        Flask backend /api/classify expects:
-        request.files["video"]
-
-        So the FormData key must be "video".
-        Do not use "file" here.
-      */
       if (Platform.OS === 'web') {
-        // Expo Web gives a URI, so convert it into a browser Blob first.
-        const fileResponse = await fetch(file.uri);
-        const blob = await fileResponse.blob();
+        // Try to get the file directly from the picker result
+        // ImagePicker on web sometimes provides the file object directly
+        const fileObj = file.file || new File([], name, { type: 'video/mp4' });
 
-        formData.append('video', blob, name);
+        // If we have a real file object, use it
+        if (fileObj && fileObj.size > 0) {
+          formData.append('video', fileObj);
+        } else {
+          // Fallback: fetch the blob URL before it expires
+          const fileResponse = await fetch(file.uri);
+          const blob = await fileResponse.blob();
+          const newFile = new File([blob], name, { type: blob.type || 'video/mp4' });
+          formData.append('video', newFile);
+        }
+
       } else {
-        // Native Android/iOS upload format.
         formData.append('video', {
           uri: file.uri,
           type: file.type === 'video' ? 'video/mp4' : 'image/jpeg',
           name,
         } as any);
       }
+      console.log('About to classify:', `${API_URL}/api/classify`);
+      console.log('Token present:', !!token);
+      console.log('FormData has video:', (formData as any).has?.('video'));
 
       const response = await fetch(`${API_URL}/api/classify`, {
         method: 'POST',
         body: formData,
         headers: {
-          Accept: 'application/json',
           Authorization: `Bearer ${token}`,
-
-          /*
-            Do not manually set Content-Type for multipart/form-data.
-            fetch will automatically add the correct boundary.
-          */
         },
-      });
+      })
 
       console.log('Classify response status:', response.status);
 
@@ -199,17 +198,23 @@ export default function DashboardScreen() {
         throw new Error(data.error || data.msg || `HTTP ${response.status}`);
       }
 
-      /*
-        New backend fusion response fields:
-        - final_label
-        - final_confidence
-        - alert_required
-        - vit_prediction
-        - i3d_prediction
-      */
       setClassificationResult(data.final_label || 'Unknown');
       setAnalysisData(data);
       setShowResultModal(true);
+
+      // Show log saved message for ALL videos (normal + anomaly)
+      const alertCount = data.alerts?.length || 0;
+      const totalAnomalies = data.summary?.total_anomalies || 0;
+
+      if (totalAnomalies === 0) {
+        setLogSavedMessage('✅ Analysis complete. Normal video log saved to system.');
+      } else {
+        setLogSavedMessage(`✅ Analysis complete. ${alertCount} alert(s) logged to system.`);
+      }
+
+      // Auto-hide the message after 5 seconds
+      setTimeout(() => setLogSavedMessage(''), 5000);
+
     } catch (error) {
       console.log('Classification error:', error);
       setClassificationResult('Error during classification');
@@ -218,24 +223,39 @@ export default function DashboardScreen() {
     }
   };
 
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const getSeverityColor = (severity: string) => {
+    switch (severity?.toLowerCase()) {
+      case 'high': return '#ff3333';
+      case 'medium': return '#ff9800';
+      case 'low': return NEON_GREEN;
+      default: return MUTED_GREEN;
+    }
+  };
+
   return (
     <ScrollView
-      style={styles.container}
+      style={dashStyles.dashContainer}
       contentContainerStyle={{ paddingBottom: 40 }}
     >
-      <View style={styles.header}>
+      <View style={dashStyles.dashHeader}>
         <Ionicons
           name="shield-checkmark"
           size={32}
           color={NEON_GREEN}
-          style={styles.neonGlow}
+          style={dashStyles.dashNeonGlow}
         />
-        <Text style={styles.headerTitle}>INTELLISIGHT CORE</Text>
-        <Text style={styles.headerSubtitle}>System Status: Online</Text>
+        <Text style={dashStyles.dashHeaderTitle}>INTELLISIGHT CORE</Text>
+        <Text style={dashStyles.dashHeaderSubtitle}>System Status: Online</Text>
       </View>
 
-      <View style={styles.mainContent}>
-        <View style={styles.videoContainer}>
+      <View style={dashStyles.dashMainContent}>
+        <View style={dashStyles.dashVideoContainer}>
           {selectedFile ? (
             selectedFile.type === 'video' ? (
               <Video
@@ -262,12 +282,12 @@ export default function DashboardScreen() {
           )}
 
           <View style={StyleSheet.absoluteFillObject}>
-            <Animated.View style={[styles.scannerLine, animatedScanStyle]} />
+            <Animated.View style={[dashStyles.dashScannerLine, animatedScanStyle]} />
 
-            <View style={styles.hudTopLeft}>
+            <View style={dashStyles.dashHudTopLeft}>
               <View
                 style={[
-                  styles.liveDot,
+                  dashStyles.dashLiveDot,
                   selectedFile && {
                     backgroundColor: classificationResult
                       ? getResultColor(classificationResult)
@@ -278,7 +298,7 @@ export default function DashboardScreen() {
 
               <Text
                 style={[
-                  styles.liveText,
+                  dashStyles.dashLiveText,
                   selectedFile && {
                     color: classificationResult
                       ? getResultColor(classificationResult)
@@ -294,38 +314,38 @@ export default function DashboardScreen() {
               </Text>
             </View>
 
-            <View style={styles.hudTopRight}>
-              <Animated.View style={[styles.recDot, animatedPulseStyle]} />
-              <Text style={styles.hudText}>REC</Text>
+            <View style={dashStyles.dashHudTopRight}>
+              <Animated.View style={[dashStyles.dashRecDot, animatedPulseStyle]} />
+              <Text style={dashStyles.dashHudText}>REC</Text>
             </View>
 
-            <View style={styles.hudBottomLeft}>
-              <Text style={styles.hudTextSmall}>MODEL: I3D + ViT v1.2</Text>
-              <Text style={styles.hudTextSmall}>LENS: 24MM WIDE</Text>
+            <View style={dashStyles.dashHudBottomLeft}>
+              <Text style={dashStyles.dashHudTextSmall}>MODEL: I3D + ViT v1.2</Text>
+              <Text style={dashStyles.dashHudTextSmall}>LENS: 24MM WIDE</Text>
             </View>
 
-            <View style={styles.hudBottomRight}>
-              <Text style={styles.hudTextSmall}>FPS: 60.00</Text>
-              <Text style={styles.hudTextSmall}>POS: [42.36, -71.05]</Text>
+            <View style={dashStyles.dashHudBottomRight}>
+              <Text style={dashStyles.dashHudTextSmall}>FPS: 60.00</Text>
+              <Text style={dashStyles.dashHudTextSmall}>POS: [42.36, -71.05]</Text>
             </View>
 
-            <View style={[styles.bracket, styles.bracketTopLeft]} />
-            <View style={[styles.bracket, styles.bracketTopRight]} />
-            <View style={[styles.bracket, styles.bracketBottomLeft]} />
-            <View style={[styles.bracket, styles.bracketBottomRight]} />
+            <View style={[dashStyles.dashBracket, dashStyles.dashBracketTopLeft]} />
+            <View style={[dashStyles.dashBracket, dashStyles.dashBracketTopRight]} />
+            <View style={[dashStyles.dashBracket, dashStyles.dashBracketBottomLeft]} />
+            <View style={[dashStyles.dashBracket, dashStyles.dashBracketBottomRight]} />
           </View>
         </View>
 
-        <View style={styles.actionSection}>
-          <Text style={styles.sectionTitle}>Manual Video / Image  Inspection</Text>
+        <View style={dashStyles.dashActionSection}>
+          <Text style={dashStyles.dashSectionTitle}>Manual Video / Image Inspection</Text>
 
-          <Text style={styles.instructionText}>
+          <Text style={dashStyles.dashInstructionText}>
             Upload a local video file or image frame to run it through the I3D +
             ViT anomaly detection engine.
           </Text>
 
           <TouchableOpacity
-            style={[styles.button, isLoading && styles.buttonDisabled]}
+            style={[dashStyles.dashButton, isLoading && dashStyles.dashButtonDisabled]}
             onPress={pickFile}
             disabled={isLoading}
           >
@@ -335,22 +355,30 @@ export default function DashboardScreen() {
               color="#000"
               style={{ marginRight: 10 }}
             />
-            <Text style={styles.buttonText}>
+            <Text style={dashStyles.dashButtonText}>
               {isLoading ? 'ANALYZING FOOTAGE...' : 'UPLOAD & ANALYZE'}
             </Text>
           </TouchableOpacity>
 
+          {/* Log Saved Message Banner */}
+          {logSavedMessage ? (
+            <View style={dashStyles.dashLogBanner}>
+              <Ionicons name="checkmark-circle" size={20} color={NEON_GREEN} />
+              <Text style={dashStyles.dashLogBannerText}>{logSavedMessage}</Text>
+            </View>
+          ) : null}
+
           {classificationResult ? (
             <View
               style={[
-                styles.resultContainer,
+                dashStyles.dashResultContainer,
                 { borderColor: getResultColor(classificationResult) },
               ]}
             >
-              <Text style={styles.resultLabel}>ANALYSIS RESULT:</Text>
+              <Text style={dashStyles.dashResultLabel}>ANALYSIS RESULT:</Text>
               <Text
                 style={[
-                  styles.resultText,
+                  dashStyles.dashResultText,
                   { color: getResultColor(classificationResult) },
                 ]}
               >
@@ -361,60 +389,111 @@ export default function DashboardScreen() {
         </View>
       </View>
 
+      {/* Enhanced Result Modal with Timeline */}
       <Modal
         visible={showResultModal}
         transparent
         animationType="fade"
         onRequestClose={() => setShowResultModal(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.analysisModal}>
-            <TouchableOpacity
-              style={styles.closeIcon}
-              onPress={() => setShowResultModal(false)}
-            >
-              <Ionicons name="close-circle" size={30} color={NEON_GREEN} />
-            </TouchableOpacity>
+        <View style={dashStyles.dashModalOverlay}>
+          <ScrollView style={dashStyles.dashModalScroll} contentContainerStyle={{ padding: 20, alignItems: 'center' }}>
+            <View style={dashStyles.dashAnalysisModal}>
+              <TouchableOpacity
+                style={dashStyles.dashCloseIcon}
+                onPress={() => setShowResultModal(false)}
+              >
+                <Ionicons name="close-circle" size={30} color={NEON_GREEN} />
+              </TouchableOpacity>
 
-            <Text style={styles.modalHeading}>ANALYSIS COMPLETE</Text>
+              <Text style={dashStyles.dashModalHeading}>ANALYSIS COMPLETE</Text>
 
-            <Text style={styles.modalLabel}>Final Result</Text>
-            <Text style={styles.modalValue}>
-              {analysisData?.final_label || 'Unknown'}
-            </Text>
+              {/* Summary Section */}
+              {analysisData?.summary && (
+                <View style={dashStyles.dashSummaryBox}>
+                  <Text style={dashStyles.dashModalLabel}>Summary</Text>
+                  <View style={dashStyles.dashSummaryRow}>
+                    <Text style={dashStyles.dashSummaryKey}>Total Anomalies:</Text>
+                    <Text style={dashStyles.dashSummaryValue}>{analysisData.summary.total_anomalies}</Text>
+                  </View>
+                  <View style={dashStyles.dashSummaryRow}>
+                    <Text style={dashStyles.dashSummaryKey}>Anomaly Duration:</Text>
+                    <Text style={dashStyles.dashSummaryValue}>{analysisData.summary.total_anomaly_duration}s</Text>
+                  </View>
+                  <View style={dashStyles.dashSummaryRow}>
+                    <Text style={dashStyles.dashSummaryKey}>Highest Severity:</Text>
+                    <Text style={[
+                      dashStyles.dashSummaryValue,
+                      { color: getSeverityColor(analysisData.summary.highest_severity) }
+                    ]}>
+                      {analysisData.summary.highest_severity}
+                    </Text>
+                  </View>
+                  <View style={dashStyles.dashSummaryRow}>
+                    <Text style={dashStyles.dashSummaryKey}>Video Duration:</Text>
+                    <Text style={dashStyles.dashSummaryValue}>{analysisData.summary.video_duration}s</Text>
+                  </View>
+                </View>
+              )}
 
-            <Text style={styles.modalLabel}>Confidence</Text>
-            <Text style={styles.modalValue}>
-              {(Number(analysisData?.final_confidence || 0) * 100).toFixed(1)}%
-            </Text>
+              {/* Timeline Section */}
+              {analysisData?.timeline && analysisData.timeline.length > 0 && (
+                <View style={dashStyles.dashTimelineBox}>
+                  <Text style={dashStyles.dashModalLabel}>Anomaly Timeline</Text>
+                  {analysisData.timeline.map((item: any, index: number) => (
+                    <View key={item.id || index} style={dashStyles.dashTimelineItem}>
+                      <View style={dashStyles.dashTimelineHeader}>
+                        <Text style={dashStyles.dashTimelineType}>{item.anomaly_type}</Text>
+                        <Text style={[
+                          dashStyles.dashTimelineConfidence,
+                          { color: getSeverityColor(item.confidence >= 0.85 ? 'high' : item.confidence >= 0.70 ? 'medium' : 'low') }
+                        ]}>
+                          {(item.confidence * 100).toFixed(1)}%
+                        </Text>
+                      </View>
+                      <Text style={dashStyles.dashTimelineTime}>
+                        ⏱ {formatTime(item.start_time)} - {formatTime(item.end_time)} ({item.duration}s)
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
 
-            <Text style={styles.modalLabel}>I3D Prediction</Text>
-            <Text style={styles.modalValue}>
-              {analysisData?.i3d_prediction?.label || 'N/A'} -{' '}
-              {((analysisData?.i3d_prediction?.confidence || 0) * 100).toFixed(1)}%
-            </Text>
+              {/* If no anomalies */}
+              {analysisData?.summary?.total_anomalies === 0 && (
+                <View style={dashStyles.dashNormalBox}>
+                  <Ionicons name="checkmark-done-circle" size={48} color={NEON_GREEN} />
+                  <Text style={dashStyles.dashNormalText}>No anomalies detected</Text>
+                  <Text style={dashStyles.dashNormalSubtext}>Video log saved successfully</Text>
+                </View>
+              )}
 
-            <Text style={styles.modalLabel}>ViT Prediction</Text>
-            <Text style={styles.modalValue}>
-              {analysisData?.vit_prediction?.label || 'N/A'} -{' '}
-              {((analysisData?.vit_prediction?.confidence || 0) * 100).toFixed(1)}%
-            </Text>
+              <Text style={dashStyles.dashModalLabel}>Final Result</Text>
+              <Text style={dashStyles.dashModalValue}>
+                {analysisData?.final_label || 'Unknown'}
+              </Text>
 
-            <Text style={styles.modalLabel}>Alert Status</Text>
-            <Text style={styles.modalValue}>
-              {analysisData?.alert_required ? 'Alert Generated' : 'No Alert'}
-            </Text>
-          </View>
+              <Text style={dashStyles.dashModalLabel}>Confidence</Text>
+              <Text style={dashStyles.dashModalValue}>
+                {(Number(analysisData?.final_confidence || 0) * 100).toFixed(1)}%
+              </Text>
+
+              <Text style={dashStyles.dashModalLabel}>Alert Status</Text>
+              <Text style={dashStyles.dashModalValue}>
+                {analysisData?.alert_required ? 'Alert Generated' : 'No Alert'}
+              </Text>
+            </View>
+          </ScrollView>
         </View>
       </Modal>
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: DARK_BG },
+const dashStyles = StyleSheet.create({
+  dashContainer: { flex: 1, backgroundColor: DARK_BG },
 
-  header: {
+  dashHeader: {
     padding: 20,
     alignItems: 'center',
     backgroundColor: 'rgba(16, 185, 82, 0.05)',
@@ -423,13 +502,13 @@ const styles = StyleSheet.create({
     borderBottomColor: 'rgba(16, 185, 82, 0.2)',
   },
 
-  neonGlow: {
+  dashNeonGlow: {
     textShadowColor: NEON_GREEN,
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10,
   },
 
-  headerTitle: {
+  dashHeaderTitle: {
     fontSize: 22,
     fontWeight: '900',
     letterSpacing: 2,
@@ -437,7 +516,7 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
 
-  headerSubtitle: {
+  dashHeaderSubtitle: {
     fontSize: 12,
     color: NEON_GREEN,
     letterSpacing: 1,
@@ -445,9 +524,9 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
 
-  mainContent: { padding: 20 },
+  dashMainContent: { padding: 20 },
 
-  videoContainer: {
+  dashVideoContainer: {
     width: '100%',
     height: 220,
     backgroundColor: 'rgba(16, 185, 82, 0.02)',
@@ -460,7 +539,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
 
-  scannerLine: {
+  dashScannerLine: {
     position: 'absolute',
     top: 0,
     width: '100%',
@@ -472,7 +551,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
 
-  hudTopLeft: {
+  dashHudTopLeft: {
     position: 'absolute',
     top: 15,
     left: 15,
@@ -485,7 +564,7 @@ const styles = StyleSheet.create({
     zIndex: 20,
   },
 
-  hudTopRight: {
+  dashHudTopRight: {
     position: 'absolute',
     top: 15,
     right: 15,
@@ -494,14 +573,14 @@ const styles = StyleSheet.create({
     zIndex: 20,
   },
 
-  hudBottomLeft: {
+  dashHudBottomLeft: {
     position: 'absolute',
     bottom: 15,
     left: 15,
     zIndex: 20,
   },
 
-  hudBottomRight: {
+  dashHudBottomRight: {
     position: 'absolute',
     bottom: 15,
     right: 15,
@@ -509,7 +588,7 @@ const styles = StyleSheet.create({
     zIndex: 20,
   },
 
-  liveDot: {
+  dashLiveDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
@@ -517,14 +596,14 @@ const styles = StyleSheet.create({
     marginRight: 6,
   },
 
-  liveText: {
+  dashLiveText: {
     color: NEON_GREEN,
     fontSize: 10,
     fontWeight: 'bold',
     letterSpacing: 1,
   },
 
-  recDot: {
+  dashRecDot: {
     width: 10,
     height: 10,
     borderRadius: 5,
@@ -532,14 +611,14 @@ const styles = StyleSheet.create({
     marginRight: 6,
   },
 
-  hudText: {
+  dashHudText: {
     color: 'rgba(255,255,255,0.8)',
     fontSize: 12,
     fontWeight: 'bold',
     letterSpacing: 1,
   },
 
-  hudTextSmall: {
+  dashHudTextSmall: {
     color: 'rgba(16, 185, 82, 0.6)',
     fontSize: 9,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
@@ -547,7 +626,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  bracket: {
+  dashBracket: {
     position: 'absolute',
     width: 20,
     height: 20,
@@ -555,35 +634,35 @@ const styles = StyleSheet.create({
     zIndex: 15,
   },
 
-  bracketTopLeft: {
+  dashBracketTopLeft: {
     top: 10,
     left: 10,
     borderTopWidth: 2,
     borderLeftWidth: 2,
   },
 
-  bracketTopRight: {
+  dashBracketTopRight: {
     top: 10,
     right: 10,
     borderTopWidth: 2,
     borderRightWidth: 2,
   },
 
-  bracketBottomLeft: {
+  dashBracketBottomLeft: {
     bottom: 10,
     left: 10,
     borderBottomWidth: 2,
     borderLeftWidth: 2,
   },
 
-  bracketBottomRight: {
+  dashBracketBottomRight: {
     bottom: 10,
     right: 10,
     borderBottomWidth: 2,
     borderRightWidth: 2,
   },
 
-  actionSection: {
+  dashActionSection: {
     backgroundColor: 'rgba(16, 185, 82, 0.03)',
     padding: 20,
     borderRadius: 16,
@@ -591,7 +670,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(16, 185, 82, 0.1)',
   },
 
-  sectionTitle: {
+  dashSectionTitle: {
     fontSize: 18,
     fontWeight: 'bold',
     marginBottom: 10,
@@ -599,14 +678,14 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
 
-  instructionText: {
+  dashInstructionText: {
     fontSize: 14,
     lineHeight: 22,
     color: MUTED_GREEN,
     marginBottom: 25,
   },
 
-  button: {
+  dashButton: {
     flexDirection: 'row',
     backgroundColor: NEON_GREEN,
     padding: 18,
@@ -619,20 +698,38 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
 
-  buttonDisabled: {
+  dashButtonDisabled: {
     backgroundColor: '#3a5240',
     shadowOpacity: 0,
     elevation: 0,
   },
 
-  buttonText: {
+  dashButtonText: {
     color: '#000',
     fontSize: 16,
     fontWeight: '900',
     letterSpacing: 1,
   },
 
-  resultContainer: {
+  dashLogBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 82, 0.1)',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 15,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 82, 0.3)',
+  },
+
+  dashLogBannerText: {
+    color: NEON_GREEN,
+    fontSize: 13,
+    marginLeft: 10,
+    fontWeight: '600',
+  },
+
+  dashResultContainer: {
     padding: 20,
     borderRadius: 12,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -641,30 +738,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
-  resultLabel: {
+  dashResultLabel: {
     color: MUTED_GREEN,
     fontSize: 12,
     letterSpacing: 2,
     marginBottom: 8,
   },
 
-  resultText: {
+  dashResultText: {
     fontSize: 16,
     textAlign: 'center',
     fontWeight: '900',
     letterSpacing: 1,
   },
 
-  modalOverlay: {
+  dashModalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.85)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
   },
 
-  analysisModal: {
+  dashModalScroll: {
     width: '100%',
+  },
+
+  dashAnalysisModal: {
+    width: '100%',
+    maxWidth: width - 40,
     backgroundColor: '#071007',
     borderRadius: 18,
     borderWidth: 1,
@@ -672,14 +773,14 @@ const styles = StyleSheet.create({
     padding: 24,
   },
 
-  closeIcon: {
+  dashCloseIcon: {
     position: 'absolute',
     top: 12,
     right: 12,
     zIndex: 100,
   },
 
-  modalHeading: {
+  dashModalHeading: {
     color: '#fff',
     fontSize: 20,
     fontWeight: '900',
@@ -688,16 +789,104 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
 
-  modalLabel: {
+  dashModalLabel: {
     color: NEON_GREEN,
     marginTop: 12,
     fontWeight: 'bold',
     letterSpacing: 1,
   },
 
-  modalValue: {
+  dashModalValue: {
     color: '#fff',
     marginTop: 5,
     fontSize: 14,
+  },
+
+  dashSummaryBox: {
+    backgroundColor: 'rgba(16, 185, 82, 0.05)',
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 82, 0.15)',
+  },
+
+  dashSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 6,
+  },
+
+  dashSummaryKey: {
+    color: MUTED_GREEN,
+    fontSize: 12,
+  },
+
+  dashSummaryValue: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+
+  dashTimelineBox: {
+    backgroundColor: 'rgba(255, 51, 51, 0.05)',
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 51, 51, 0.2)',
+  },
+
+  dashTimelineItem: {
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 8,
+    borderLeftWidth: 3,
+    borderLeftColor: '#ff3333',
+  },
+
+  dashTimelineHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  dashTimelineType: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 'bold',
+    textTransform: 'uppercase',
+  },
+
+  dashTimelineConfidence: {
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+
+  dashTimelineTime: {
+    color: MUTED_GREEN,
+    fontSize: 11,
+    marginTop: 4,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+
+  dashNormalBox: {
+    alignItems: 'center',
+    padding: 20,
+    marginBottom: 16,
+  },
+
+  dashNormalText: {
+    color: NEON_GREEN,
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginTop: 10,
+  },
+
+  dashNormalSubtext: {
+    color: MUTED_GREEN,
+    fontSize: 12,
+    marginTop: 5,
   },
 });

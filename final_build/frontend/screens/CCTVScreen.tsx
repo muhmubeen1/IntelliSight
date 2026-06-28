@@ -3,6 +3,7 @@
  * CCTVScreen.tsx — IntelliSight Live Surveillance Screen
  * ============================================================
  * Fixed: Auto-stream on mount removed, proper details table added
+ * Fixed: Live classification polling URL corrected to /api/live-classification
  */
 
 import { Ionicons } from "@expo/vector-icons";
@@ -29,7 +30,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
-import { getLiveStreamStatus } from "../api";
+import { getLiveStreamStatus, getToken } from "../api";
 import { CAMERAS } from "../config/streams";
 
 // ─────────────────────────────────────────────────────────────
@@ -56,6 +57,10 @@ interface ClassificationResult {
   timestamp: string;
   alert_required: boolean;
   severity: Severity;
+  stable_label?: string;
+  raw_label?: string;
+  raw_confidence?: number;
+  consecutive_anomaly_count?: number;
 }
 
 interface PopupData {
@@ -93,8 +98,7 @@ interface DetectionHistoryItem {
 
 const getStoredToken = async (): Promise<string | null> => {
   try {
-    const AsyncStorage = (await import("@react-native-async-storage/async-storage")).default;
-    return await AsyncStorage.getItem("jwt_token");
+    return await getToken();
   } catch {
     return null;
   }
@@ -296,8 +300,10 @@ export default function CCTVScreen() {
   const checkServerStatus = async () => {
     try {
       const data = await getLiveStreamStatus();
-      // Only restore UI state, DO NOT auto-start stream
-      setIsStreaming(data.isStreaming || false);
+
+      const streamIsLive = data.isStreaming || false;
+      setIsStreaming(streamIsLive);
+
       if (data.mode === "mobile-cam") setMode("mobile-cam");
       else if (data.mode === "ip-camera") setMode("ip-camera");
       else setMode("local");
@@ -305,7 +311,18 @@ export default function CCTVScreen() {
       if (data.streamUrl) {
         setStreamUrl(data.streamUrl.replace("localhost", "192.168.100.12"));
       }
+
+      // Restore stream start time for duration counter after refresh
+      if (data.streamStartTime) {
+        streamStartTimeRef.current = data.streamStartTime;
+      }
+
       setError(null);
+
+      // If stream is already running after page refresh, resume detection polling
+      if (streamIsLive) {
+        await startAutoDetection();
+      }
     } catch {
       // Server not reachable — this is normal on first load
       setIsStreaming(false);
@@ -342,6 +359,7 @@ export default function CCTVScreen() {
         const headers: Record<string, string> = {};
         if (authTokenRef.current) headers["Authorization"] = `Bearer ${authTokenRef.current}`;
 
+        // FIXED: Added /api prefix to live-classification endpoint
         const response = await fetch(`${API_URL}/api/live-classification`, { headers });
         if (!response.ok) return;
 
@@ -353,6 +371,10 @@ export default function CCTVScreen() {
             timestamp: data.data.timestamp || getCurrentTimestamp(),
             alert_required: data.data.alert_required || false,
             severity: data.data.severity || "Low",
+            stable_label: data.data.stable_label,
+            raw_label: data.data.raw_label,
+            raw_confidence: data.data.raw_confidence,
+            consecutive_anomaly_count: data.data.consecutive_anomaly_count || 0,
           };
           setClassification(result);
 
@@ -384,7 +406,8 @@ export default function CCTVScreen() {
         const headers: Record<string, string> = {};
         if (authTokenRef.current) headers["Authorization"] = `Bearer ${authTokenRef.current}`;
 
-        const response = await fetch(`${API_URL}/live-classification`, { headers });
+        // FIXED: Added /api prefix to live-classification endpoint
+        const response = await fetch(`${API_URL}/api/live-classification`, { headers });
         if (!response.ok) return;
 
         const data = await response.json();
@@ -479,9 +502,21 @@ export default function CCTVScreen() {
       });
 
       // Clear history on new stream
+      // Clear history on new stream
       setDetectionHistory([]);
 
-      // Start auto-detection
+      // Start backend background analysis thread
+      try {
+        await fetch(`${API_URL}/api/live-analysis/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        });
+        console.log("[CONNECT] Background analysis started");
+      } catch (e) {
+        console.error("[CONNECT] Failed to start background analysis:", e);
+      }
+
+      // Start frontend polling
       await startAutoDetection();
 
     } catch (err: any) {
@@ -507,6 +542,16 @@ export default function CCTVScreen() {
         webVideoRef.current.pause();
         webVideoRef.current.removeAttribute("src");
         webVideoRef.current.load();
+      }
+      // Stop backend background analysis
+      try {
+        await fetch(`${API_URL}/api/live-analysis/stop`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        });
+        console.log("[DISCONNECT] Background analysis stopped");
+      } catch (e) {
+        console.error("[DISCONNECT] Failed to stop background analysis:", e);
       }
 
       cleanupAllIntervals();
@@ -644,11 +689,16 @@ export default function CCTVScreen() {
             {classification && !error && !isLoading && isStreaming && (
               <View style={styles.hudBottomLeft}>
                 <Text style={[styles.classificationText, isAnomaly ? { color: ALERT_RED } : { color: NEON_GREEN }]}>
-                  {isAnomaly ? `⚠️ THREAT: ${classification.result.toUpperCase()}` : "SYSTEM CLEAR"}
+                  {isAnomaly ? `⚠️ THREAT: ${(classification.stable_label || classification.result).toUpperCase()}` : "SYSTEM CLEAR"}
                 </Text>
                 <Text style={styles.confidenceText}>
                   CONFIDENCE: {formatConfidence(classification.confidence)}
                 </Text>
+                {(classification.consecutive_anomaly_count || 0) > 2 && (
+                  <Text style={styles.persistenceBadge}>
+                    PERSISTENT: {classification.consecutive_anomaly_count} CYCLES
+                  </Text>
+                )}
                 {classification.severity === "High" && (
                   <Text style={styles.highAlertBadge}>HIGH ALERT</Text>
                 )}
@@ -843,8 +893,20 @@ export default function CCTVScreen() {
                   <View style={styles.currentDetectionCard}>
                     <View style={styles.currentDetectionRow}>
                       <Text style={styles.currentDetectionLabel}>Label:</Text>
-                      <Text style={[styles.currentDetectionValue, { color: classification.result !== "NormalVideos" ? ALERT_RED : NEON_GREEN }]}>
-                        {classification.result}
+                      <Text style={[styles.currentDetectionValue, { color: (classification.stable_label || classification.result) !== "NormalVideos" ? ALERT_RED : NEON_GREEN }]}>
+                        {classification.stable_label || classification.result}
+                      </Text>
+                    </View>
+                    <View style={styles.currentDetectionRow}>
+                      <Text style={styles.currentDetectionLabel}>Raw Label:</Text>
+                      <Text style={[styles.currentDetectionValue, { color: MUTED_GREEN, fontSize: 10 }]}>
+                        {classification.raw_label || "—"} ({formatConfidence(classification.raw_confidence || 0)})
+                      </Text>
+                    </View>
+                    <View style={styles.currentDetectionRow}>
+                      <Text style={styles.currentDetectionLabel}>Persistence:</Text>
+                      <Text style={[styles.currentDetectionValue, { color: (classification.consecutive_anomaly_count || 0) > 2 ? ALERT_RED : MUTED_GREEN }]}>
+                        {(classification.consecutive_anomaly_count || 0)} cycles
                       </Text>
                     </View>
                     <View style={styles.currentDetectionRow}>
@@ -1051,11 +1113,10 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
   },
-  modalHintText: {
+  hintText: {
     color: MUTED_GREEN,
     fontSize: 11,
-    marginTop: -10,
-    marginBottom: 16,
+    marginTop: 8,
     letterSpacing: 0.5,
   },
   errorText: {
@@ -1111,6 +1172,18 @@ const styles = StyleSheet.create({
     marginTop: 4,
     letterSpacing: 1,
     backgroundColor: "rgba(255, 51, 51, 0.2)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignSelf: "flex-start",
+  },
+  persistenceBadge: {
+    color: ORANGE,
+    fontSize: 9,
+    fontWeight: "900",
+    marginTop: 4,
+    letterSpacing: 1,
+    backgroundColor: "rgba(255, 165, 0, 0.2)",
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
@@ -1212,16 +1285,6 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
 
-  hintText: {
-    color: MUTED_GREEN,
-    fontSize: 11,
-    marginTop: -10,
-    marginBottom: 16,
-    letterSpacing: 0.5,
-  },
-
-  credentialsRow: { flexDirection: "row" },
-
   modeRow: { flexDirection: "row", gap: 8, marginBottom: 16 },
   modeButton: {
     flex: 1,
@@ -1235,6 +1298,7 @@ const styles = StyleSheet.create({
   modeText: { color: NEON_GREEN, marginTop: 6, fontSize: 10, fontWeight: "900" },
   activeModeText: { color: "#000" },
 
+  credentialsRow: { flexDirection: "row" },
   modalButtonRow: { flexDirection: "row", gap: 12, marginTop: 5 },
   backButton: {
     flex: 1,
@@ -1260,7 +1324,6 @@ const styles = StyleSheet.create({
   },
   modalConnectText: { color: "#000", fontWeight: "900" },
 
-  // ── Details Modal Styles ──────────────────────────────────
   detailsScrollView: {
     flex: 1,
   },
@@ -1272,7 +1335,6 @@ const styles = StyleSheet.create({
     padding: 20,
   },
 
-  // Table Section
   tableSection: {
     marginBottom: 20,
   },
@@ -1284,7 +1346,6 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
-  // Info Table
   table: {
     backgroundColor: "rgba(16, 185, 82, 0.03)",
     borderRadius: 10,
@@ -1316,7 +1377,6 @@ const styles = StyleSheet.create({
     textAlign: "right",
   },
 
-  // Detection History Table
   detectionTable: {
     backgroundColor: "rgba(16, 185, 82, 0.03)",
     borderRadius: 10,
@@ -1379,7 +1439,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
 
-  // Current Detection Card
   currentDetectionCard: {
     backgroundColor: "rgba(16, 185, 82, 0.05)",
     borderRadius: 10,
@@ -1432,7 +1491,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
 
-  // ── Result Popup Styles ───────────────────────────────────
   resultModalBox: {
     backgroundColor: "#07110a",
     borderRadius: 16,

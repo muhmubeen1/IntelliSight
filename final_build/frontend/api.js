@@ -105,7 +105,17 @@ export const healthCheck = async () => {
 
 export const getLiveClassification = async () => {
     try {
-        const response = await axios.get(`${API_URL}/live-classification`);
+        const token = await getToken();
+
+        const response = await axios.get(
+            `${API_URL}/api/live-classification`,
+            {
+                headers: token
+                    ? { Authorization: `Bearer ${token}` }
+                    : {},
+            }
+        );
+
         return response.data;
     } catch (error) {
         throw error.response?.data || 'Failed to fetch live classification';

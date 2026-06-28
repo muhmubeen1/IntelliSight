@@ -72,3 +72,37 @@ class I3DService:
             "label": label,
             "confidence": round(float(confidence.item()), 4)
         }
+
+    def predict_video(self, video_path: str, max_frames: int = 32):
+        """Extract frames from video path and predict."""
+        import cv2
+        
+        frames = []
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"[I3D] Cannot open video: {video_path}")
+            return {"label": "Unknown", "confidence": 0.0}
+        
+        frame_count = 0
+        while len(frames) < max_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Normalize to 0-1 range for I3D
+            frame_normalized = frame_rgb / 255.0
+            frames.append(frame_normalized)
+            frame_count += 1
+        
+        cap.release()
+        
+        print(f"[I3D] Extracted {len(frames)} frames from {video_path}")
+        
+        if len(frames) == 0:
+            return {"label": "Unknown", "confidence": 0.0}
+        
+        # Pad with last frame if needed
+        while len(frames) < 32:
+            frames.append(frames[-1])
+        
+        return self.predict_frames(frames)

@@ -21,7 +21,7 @@ const MUTED_GREEN = '#8A9A8D';
 const API_BASE_URL = 'http://192.168.100.12:5000';
 
 export default function ArchivesScreen({ navigation }: any) {
-    const [detections, setDetections] = useState<any[]>([]);
+    const [archives, setArchives] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
 
@@ -34,17 +34,17 @@ export default function ArchivesScreen({ navigation }: any) {
         );
     };
 
-    const fetchDetections = async () => {
+    const fetchArchives = async () => {
         try {
             const token = getToken();
 
             if (!token) {
                 Alert.alert('Auth Error', 'Login token not found.');
-                setDetections([]);
+                setArchives([]);
                 return;
             }
 
-            const response = await fetch(`${API_BASE_URL}/api/alerts`, {
+            const response = await fetch(`${API_BASE_URL}/api/alerts/archives`, {
                 method: 'GET',
                 headers: {
                     Authorization: `Bearer ${token}`,
@@ -54,23 +54,16 @@ export default function ArchivesScreen({ navigation }: any) {
 
             const data = await response.json();
 
-            if (!response.ok) {
-                console.log('Archive API error:', data);
-                setDetections([]);
+            if (!response.ok || !data.success) {
+                console.log('Archives API error:', data);
+                setArchives([]);
                 return;
             }
 
-            const archivedItems = Array.isArray(data)
-                ? data.filter((item) => {
-                    const status = String(item.status || '').toLowerCase().trim();
-                    return status === 'reviewed' || status === 'archived';
-                })
-                : [];
-
-            setDetections(archivedItems);
+            setArchives(data.data || []);
         } catch (error) {
             console.log('Archive fetch error:', error);
-            Alert.alert('Error', 'Unable to load archived detections.');
+            Alert.alert('Error', 'Unable to load archives.');
         } finally {
             setLoading(false);
             setRefreshing(false);
@@ -79,10 +72,10 @@ export default function ArchivesScreen({ navigation }: any) {
 
     const onRefresh = () => {
         setRefreshing(true);
-        fetchDetections();
+        fetchArchives();
     };
 
-    const exportReport = async () => {
+    const downloadArchivePdf = async (archiveId: number, archiveDate: string) => {
         try {
             const token = getToken();
 
@@ -91,10 +84,37 @@ export default function ArchivesScreen({ navigation }: any) {
                 return;
             }
 
-            const pdfUrl = `${API_BASE_URL}/api/reports/detections/pdf`;
+            const pdfUrl = `${API_BASE_URL}/api/alerts/archive/${archiveId}/pdf`;
+
+            if (Platform.OS === 'web') {
+                const response = await fetch(pdfUrl, {
+                    method: 'GET',
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                    },
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to download PDF');
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `IntelliSight_Archive_${archiveDate}.pdf`;
+                document.body.appendChild(link);
+                link.click();
+
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(url);
+
+                return;
+            }
 
             const fileUri =
-                FileSystem.cacheDirectory + 'intellisight_archived_report.pdf';
+                FileSystem.cacheDirectory + `intellisight_archive_${archiveDate}.pdf`;
 
             const downloadResult = await FileSystem.downloadAsync(pdfUrl, fileUri, {
                 headers: {
@@ -107,21 +127,26 @@ export default function ArchivesScreen({ navigation }: any) {
             if (sharingAvailable) {
                 await Sharing.shareAsync(downloadResult.uri);
             } else {
-                Alert.alert('Report Downloaded', `Saved at:\n${downloadResult.uri}`);
+                Alert.alert('PDF Downloaded', `Saved at:\n${downloadResult.uri}`);
             }
         } catch (error) {
-            console.log('PDF export error:', error);
-            Alert.alert('Export Error', 'Unable to export PDF report.');
+            console.log('Archive PDF download error:', error);
+            Alert.alert('Download Error', 'Unable to download archive PDF.');
         }
     };
 
     useEffect(() => {
-        fetchDetections();
+        fetchArchives();
     }, []);
 
     const formatDate = (dateString: string) => {
         if (!dateString) return 'NO DATE';
-        return new Date(dateString).toLocaleDateString();
+
+        return new Date(dateString).toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+        });
     };
 
     return (
@@ -137,13 +162,8 @@ export default function ArchivesScreen({ navigation }: any) {
                 <Text style={styles.headerTitle}>SECURE ARCHIVES</Text>
 
                 <Text style={styles.headerSubtitle}>
-                    Stored Events: {detections.length}
+                    Archive Days: {archives.length}
                 </Text>
-
-                <TouchableOpacity style={styles.exportButton} onPress={exportReport}>
-                    <Ionicons name="download-outline" size={16} color={DARK_BG} />
-                    <Text style={styles.exportText}>EXPORT REPORT</Text>
-                </TouchableOpacity>
             </View>
 
             <ScrollView
@@ -156,7 +176,7 @@ export default function ArchivesScreen({ navigation }: any) {
                     />
                 }
             >
-                <Text style={styles.sectionTitle}>RECENT BACKUPS</Text>
+                <Text style={styles.sectionTitle}>DAILY ALERT ARCHIVES</Text>
 
                 {loading ? (
                     <ActivityIndicator
@@ -164,46 +184,60 @@ export default function ArchivesScreen({ navigation }: any) {
                         size="large"
                         style={{ marginTop: 40 }}
                     />
-                ) : detections.length === 0 ? (
-                    <Text style={styles.emptyText}>No archived detections found.</Text>
+                ) : archives.length === 0 ? (
+                    <Text style={styles.emptyText}>No archive records found.</Text>
                 ) : (
                     <View style={styles.grid}>
-                        {detections.map((item) => (
-                            <TouchableOpacity
-                                key={String(item.alert_id)}
+                        {archives.map((item) => (
+                            <View
+                                key={String(item.archive_id)}
                                 style={styles.archiveBox}
-                                onPress={() =>
-                                    navigation.navigate('DetectionDetails', {
-                                        detection: item,
-                                    })
-                                }
                             >
                                 <Ionicons
-                                    name="folder-outline"
+                                    name="archive-outline"
                                     size={30}
-                                    color={MUTED_GREEN}
+                                    color={NEON_GREEN}
                                 />
 
                                 <Text style={styles.archiveDate}>
-                                    {formatDate(item.created_at)}
-                                </Text>
-
-                                <Text style={styles.archiveSize} numberOfLines={1}>
-                                    {item.filename || 'Unknown File'}
-                                </Text>
-
-                                <Text style={styles.archiveSize} numberOfLines={1}>
-                                    {item.anomaly_type || 'Unknown'}
+                                    {formatDate(item.archive_date)}
                                 </Text>
 
                                 <Text style={styles.archiveSize}>
-                                    Conf: {(Number(item.confidence || 0) * 100).toFixed(1)}%
+                                    Total Alerts: {item.total_alerts}
                                 </Text>
 
-                                <Text style={styles.archiveStatus}>
-                                    {item.status || 'reviewed'}
+                                <Text style={styles.archiveSize}>
+                                    High: {item.high_count} | Medium: {item.medium_count} | Low: {item.low_count}
                                 </Text>
-                            </TouchableOpacity>
+
+                                <Text style={styles.archiveSize}>
+                                    Stream: {item.stream_alerts}
+                                </Text>
+
+                                <Text style={styles.archiveSize}>
+                                    Manual: {item.manual_alerts}
+                                </Text>
+
+                                <TouchableOpacity
+                                    style={styles.downloadButton}
+                                    onPress={() =>
+                                        downloadArchivePdf(
+                                            item.archive_id,
+                                            item.archive_date
+                                        )
+                                    }
+                                >
+                                    <Ionicons
+                                        name="download-outline"
+                                        size={14}
+                                        color={DARK_BG}
+                                    />
+                                    <Text style={styles.downloadText}>
+                                        PDF REPORT
+                                    </Text>
+                                </TouchableOpacity>
+                            </View>
                         ))}
                     </View>
                 )}
@@ -244,22 +278,6 @@ const styles = StyleSheet.create({
         marginTop: 5,
         fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     },
-    exportButton: {
-        marginTop: 14,
-        backgroundColor: NEON_GREEN,
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: 16,
-        paddingVertical: 9,
-        borderRadius: 8,
-        gap: 6,
-    },
-    exportText: {
-        color: DARK_BG,
-        fontSize: 11,
-        fontWeight: '900',
-        letterSpacing: 1,
-    },
     content: {
         padding: 20,
     },
@@ -278,14 +296,14 @@ const styles = StyleSheet.create({
     },
     archiveBox: {
         width: '47%',
-        minHeight: 150,
+        minHeight: 210,
         backgroundColor: 'rgba(16, 185, 82, 0.02)',
         borderRadius: 12,
         borderWidth: 1,
         borderColor: 'rgba(16, 185, 82, 0.2)',
         justifyContent: 'center',
         alignItems: 'center',
-        padding: 10,
+        padding: 12,
     },
     archiveDate: {
         color: NEON_GREEN,
@@ -293,19 +311,29 @@ const styles = StyleSheet.create({
         fontWeight: 'bold',
         marginTop: 10,
         letterSpacing: 1,
+        textAlign: 'center',
     },
     archiveSize: {
         color: MUTED_GREEN,
         fontSize: 10,
-        marginTop: 5,
+        marginTop: 6,
         fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
         textAlign: 'center',
     },
-    archiveStatus: {
-        color: NEON_GREEN,
+    downloadButton: {
+        marginTop: 12,
+        backgroundColor: NEON_GREEN,
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 10,
+        paddingVertical: 7,
+        borderRadius: 8,
+        gap: 5,
+    },
+    downloadText: {
+        color: DARK_BG,
         fontSize: 9,
-        marginTop: 6,
-        textTransform: 'uppercase',
+        fontWeight: '900',
         letterSpacing: 1,
     },
     emptyText: {

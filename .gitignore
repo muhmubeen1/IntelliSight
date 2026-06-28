@@ -61,3 +61,7 @@ final_build/backend/test*.mp4
 # -------------------------
 .DS_Store
 Thumbs.db
+
+
+final_build/backend/uploads/*
+!final_build/backend/uploads/.gitkeep
