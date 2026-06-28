@@ -45,6 +45,10 @@ const MUTED_GREEN = "#8A9A8D";
 const ALERT_RED = "#ff3333";
 const ORANGE = "#FFA500";
 
+// Prevent the same live anomaly popup from appearing repeatedly every poll cycle.
+// Detections are still saved/logged normally; only popup display is rate-limited.
+const POPUP_COOLDOWN_MS = 30000;
+
 // ─────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────
@@ -181,6 +185,7 @@ export default function CCTVScreen() {
   // ── ALL useRef hooks ──────────────────────────────────────
   const hasBeepedRef = useRef<boolean>(false);
   const lastPopupTimestampRef = useRef<string | null>(null);
+  const lastPopupByLabelRef = useRef<Record<string, number>>({});
   const videoRef = useRef<Video>(null);
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
   const classificationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -347,6 +352,7 @@ export default function CCTVScreen() {
     cleanupAllIntervals();
     hasBeepedRef.current = false;
     lastPopupTimestampRef.current = null;
+    lastPopupByLabelRef.current = {};
 
     const token = await getStoredToken();
     authTokenRef.current = token;
@@ -423,8 +429,23 @@ export default function CCTVScreen() {
   };
 
   const handleDetectionPopup = (popupData: PopupData): void => {
+    // Ignore the exact same backend popup event if it is received again.
     if (lastPopupTimestampRef.current === popupData.timestamp) return;
+
+    const popupKey = `${popupData.label}-${popupData.severity}`;
+    const now = Date.now();
+    const lastShownAt = lastPopupByLabelRef.current[popupKey] || 0;
+
+    // Keep saving/logging every detection, but avoid showing the same popup repeatedly.
+    if (now - lastShownAt < POPUP_COOLDOWN_MS) {
+      lastPopupTimestampRef.current = popupData.timestamp;
+      console.log("[POPUP] Suppressed duplicate popup:", popupKey);
+      return;
+    }
+
     lastPopupTimestampRef.current = popupData.timestamp;
+    lastPopupByLabelRef.current[popupKey] = now;
+
     setPopupData(popupData);
     setResultPopupVisible(true);
     console.log("[POPUP] Detection result:", popupData.label);
@@ -562,6 +583,7 @@ export default function CCTVScreen() {
       setStreamDuration("00:00:00");
       hasBeepedRef.current = false;
       lastPopupTimestampRef.current = null;
+      lastPopupByLabelRef.current = {};
       streamStartTimeRef.current = null;
       authTokenRef.current = null;
       setError("NO SIGNAL: Stream disconnected.");
