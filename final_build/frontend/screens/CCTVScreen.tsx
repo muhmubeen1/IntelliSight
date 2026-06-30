@@ -54,6 +54,7 @@ const POPUP_COOLDOWN_MS = 30000;
 // ─────────────────────────────────────────────────────────────
 type StreamMode = "local" | "mobile-cam" | "ip-camera";
 type Severity = "High" | "Medium" | "Low";
+type DemoType = "normal" | "fighting" | "shooting" | "roadaccident" | "burglary";
 
 interface ClassificationResult {
   result: string;
@@ -95,6 +96,21 @@ interface DetectionHistoryItem {
   severity: Severity;
   status: string;
 }
+
+interface DemoOption {
+  label: string;
+  value: DemoType;
+  icon: React.ComponentProps<typeof Ionicons>["name"];
+  cameraName: string;
+}
+
+const DEMO_OPTIONS: DemoOption[] = [
+  { label: "Normal Activity", value: "normal", icon: "checkmark-circle", cameraName: "Normal Activity Demo" },
+  { label: "Fighting", value: "fighting", icon: "flame", cameraName: "Fighting Demo" },
+  { label: "Shooting", value: "shooting", icon: "warning", cameraName: "Shooting Demo" },
+  { label: "Road Accident", value: "roadaccident", icon: "car-sport", cameraName: "Road Accident Demo" },
+  { label: "Burglary", value: "burglary", icon: "home", cameraName: "Burglary Demo" },
+];
 
 // ─────────────────────────────────────────────────────────────
 // HELPER FUNCTIONS (outside component)
@@ -173,6 +189,7 @@ export default function CCTVScreen() {
   const [resultPopupVisible, setResultPopupVisible] = useState(false);
   const [cameraName, setCameraName] = useState("Main Entrance Camera");
   const [mode, setMode] = useState<StreamMode>("local");
+  const [demoType, setDemoType] = useState<DemoType>("normal");
   const [mobileStreamUrl, setMobileStreamUrl] = useState("http://192.168.100.21:8080/video");
   const [ipAddress, setIpAddress] = useState("");
   const [ipUsername, setIpUsername] = useState("admin");
@@ -462,6 +479,12 @@ export default function CCTVScreen() {
 
       let requestBody: Record<string, string> = { mode };
 
+      if (mode === "local") {
+        const selectedDemo = DEMO_OPTIONS.find((item) => item.value === demoType);
+        requestBody.demoType = demoType;
+        requestBody.cameraName = selectedDemo?.cameraName || "Demo Camera";
+      }
+
       if (mode === "mobile-cam") {
         if (!mobileStreamUrl.trim()) {
           throw new Error("Please enter the phone camera URL.");
@@ -516,7 +539,11 @@ export default function CCTVScreen() {
       setStreamDetails({
         mode,
         cameraName,
-        streamUrl: mode === "mobile-cam" ? mobileStreamUrl : mode === "ip-camera" ? ipAddress : "Demo Video",
+        streamUrl: mode === "mobile-cam"
+          ? mobileStreamUrl
+          : mode === "ip-camera"
+            ? ipAddress
+            : `${DEMO_OPTIONS.find((item) => item.value === demoType)?.label || "Demo Video"} Demo`,
         connectedAt: now,
         status: "Connected",
         duration: "00:00:00",
@@ -773,72 +800,110 @@ export default function CCTVScreen() {
       {/* Connect Camera Modal */}
       <Modal visible={modalVisible} transparent animationType="fade" onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalOverlay}>
-          <View style={styles.modalBox}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>CONNECT CAMERA</Text>
-              <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}>
-                <Ionicons name="close" size={24} color={ALERT_RED} />
-              </TouchableOpacity>
-            </View>
+          <ScrollView
+            style={styles.connectModalScroll}
+            contentContainerStyle={styles.connectModalScrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.modalBox}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>CONNECT CAMERA</Text>
+                <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}>
+                  <Ionicons name="close" size={24} color={ALERT_RED} />
+                </TouchableOpacity>
+              </View>
 
-            <Text style={styles.inputLabel}>CAMERA NAME</Text>
-            <TextInput style={styles.input} placeholder="Main Entrance Camera" placeholderTextColor={MUTED_GREEN} value={cameraName} onChangeText={setCameraName} />
+              <Text style={styles.inputLabel}>CAMERA NAME</Text>
+              <TextInput style={styles.input} placeholder="Main Entrance Camera" placeholderTextColor={MUTED_GREEN} value={cameraName} onChangeText={setCameraName} />
 
-            <Text style={styles.inputLabel}>SOURCE TYPE</Text>
-            <View style={styles.modeRow}>
-              <TouchableOpacity style={[styles.modeButton, mode === "local" && styles.activeModeButton]} onPress={() => setMode("local")}>
-                <Ionicons name="film" size={20} color={mode === "local" ? "#000" : NEON_GREEN} />
-                <Text style={[styles.modeText, mode === "local" && styles.activeModeText]}>DEMO VIDEO</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.modeButton, mode === "mobile-cam" && styles.activeModeButton]} onPress={() => setMode("mobile-cam")}>
-                <Ionicons name="phone-portrait" size={20} color={mode === "mobile-cam" ? "#000" : NEON_GREEN} />
-                <Text style={[styles.modeText, mode === "mobile-cam" && styles.activeModeText]}>MOBILE CAM</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.modeButton, mode === "ip-camera" && styles.activeModeButton]} onPress={() => setMode("ip-camera")}>
-                <Ionicons name="camera" size={20} color={mode === "ip-camera" ? "#000" : NEON_GREEN} />
-                <Text style={[styles.modeText, mode === "ip-camera" && styles.activeModeText]}>IP CAMERA</Text>
-              </TouchableOpacity>
-            </View>
+              <Text style={styles.inputLabel}>SOURCE TYPE</Text>
+              <View style={styles.modeRow}>
+                <TouchableOpacity style={[styles.modeButton, mode === "local" && styles.activeModeButton]} onPress={() => setMode("local")}>
+                  <Ionicons name="film" size={20} color={mode === "local" ? "#000" : NEON_GREEN} />
+                  <Text style={[styles.modeText, mode === "local" && styles.activeModeText]}>DEMO STREAM</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.modeButton, mode === "mobile-cam" && styles.activeModeButton]} onPress={() => setMode("mobile-cam")}>
+                  <Ionicons name="phone-portrait" size={20} color={mode === "mobile-cam" ? "#000" : NEON_GREEN} />
+                  <Text style={[styles.modeText, mode === "mobile-cam" && styles.activeModeText]}>MOBILE CAM</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.modeButton, mode === "ip-camera" && styles.activeModeButton]} onPress={() => setMode("ip-camera")}>
+                  <Ionicons name="camera" size={20} color={mode === "ip-camera" ? "#000" : NEON_GREEN} />
+                  <Text style={[styles.modeText, mode === "ip-camera" && styles.activeModeText]}>IP CAMERA</Text>
+                </TouchableOpacity>
+              </View>
 
-            {mode === "mobile-cam" && (
-              <>
-                <Text style={styles.inputLabel}>PHONE STREAM URL</Text>
-                <TextInput style={styles.input} placeholder="http://192.168.100.21:8080/video" placeholderTextColor={MUTED_GREEN} value={mobileStreamUrl} onChangeText={setMobileStreamUrl} autoCapitalize="none" keyboardType="url" />
-                <Text style={styles.hintText}>Install IP Webcam app → Start Server → copy the URL shown</Text>
-              </>
-            )}
-
-            {mode === "ip-camera" && (
-              <>
-                <Text style={styles.inputLabel}>CAMERA IP ADDRESS</Text>
-                <TextInput style={styles.input} placeholder="192.168.1.64 or rtsp://admin:pass@IP:554/stream" placeholderTextColor={MUTED_GREEN} value={ipAddress} onChangeText={setIpAddress} autoCapitalize="none" keyboardType="url" />
-                <View style={styles.credentialsRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.inputLabel}>USERNAME</Text>
-                    <TextInput style={styles.input} placeholder="admin" placeholderTextColor={MUTED_GREEN} value={ipUsername} onChangeText={setIpUsername} autoCapitalize="none" />
+              {mode === "local" && (
+                <>
+                  <Text style={styles.inputLabel}>SELECT DEMO</Text>
+                  <View style={styles.demoGrid}>
+                    {DEMO_OPTIONS.map((item) => {
+                      const isSelected = demoType === item.value;
+                      return (
+                        <TouchableOpacity
+                          key={item.value}
+                          style={[styles.demoOption, isSelected && styles.demoSelected]}
+                          onPress={() => {
+                            setDemoType(item.value);
+                            setCameraName(item.cameraName);
+                          }}
+                        >
+                          <Ionicons
+                            name={item.icon}
+                            size={18}
+                            color={isSelected ? "#000" : NEON_GREEN}
+                          />
+                          <Text style={[styles.demoText, isSelected && styles.demoTextSelected]}>
+                            {item.label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
-                  <View style={{ width: 10 }} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.inputLabel}>PASSWORD</Text>
-                    <TextInput style={styles.input} placeholder="••••••••" placeholderTextColor={MUTED_GREEN} value={ipPassword} onChangeText={setIpPassword} secureTextEntry />
-                  </View>
-                </View>
-                <Text style={styles.hintText}>Connect camera to the same router via LAN or Wi-Fi</Text>
-              </>
-            )}
+                  {/* <Text style={styles.hintText}>Choose one trained class demo for FYP live analysis</Text> */}
+                </>
+              )}
 
-            <View style={styles.modalButtonRow}>
-              <TouchableOpacity style={styles.backButton} onPress={() => setModalVisible(false)}>
-                <Ionicons name="arrow-back" size={18} color={MUTED_GREEN} />
-                <Text style={styles.backButtonText}>BACK</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.modalConnectButton} onPress={handleConnectCamera} disabled={isLoading}>
-                {isLoading ? <ActivityIndicator color="#000" /> : (
-                  <><Ionicons name="play" size={18} color="#000" /><Text style={styles.modalConnectText}>CONNECT</Text></>
-                )}
-              </TouchableOpacity>
+              {mode === "mobile-cam" && (
+                <>
+                  <Text style={styles.inputLabel}>PHONE STREAM URL</Text>
+                  <TextInput style={styles.input} placeholder="http://192.168.100.21:8080/video" placeholderTextColor={MUTED_GREEN} value={mobileStreamUrl} onChangeText={setMobileStreamUrl} autoCapitalize="none" keyboardType="url" />
+                  <Text style={styles.hintText}>Install IP Webcam app → Start Server → copy the URL shown</Text>
+                </>
+              )}
+
+              {mode === "ip-camera" && (
+                <>
+                  <Text style={styles.inputLabel}>CAMERA IP ADDRESS</Text>
+                  <TextInput style={styles.input} placeholder="192.168.1.64 or rtsp://admin:pass@IP:554/stream" placeholderTextColor={MUTED_GREEN} value={ipAddress} onChangeText={setIpAddress} autoCapitalize="none" keyboardType="url" />
+                  <View style={styles.credentialsRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.inputLabel}>USERNAME</Text>
+                      <TextInput style={styles.input} placeholder="admin" placeholderTextColor={MUTED_GREEN} value={ipUsername} onChangeText={setIpUsername} autoCapitalize="none" />
+                    </View>
+                    <View style={{ width: 10 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.inputLabel}>PASSWORD</Text>
+                      <TextInput style={styles.input} placeholder="••••••••" placeholderTextColor={MUTED_GREEN} value={ipPassword} onChangeText={setIpPassword} secureTextEntry />
+                    </View>
+                  </View>
+                  <Text style={styles.hintText}>Connect camera to the same router via LAN or Wi-Fi</Text>
+                </>
+              )}
+
+              <View style={styles.modalButtonRow}>
+                <TouchableOpacity style={styles.backButton} onPress={() => setModalVisible(false)}>
+                  <Ionicons name="arrow-back" size={18} color={MUTED_GREEN} />
+                  <Text style={styles.backButtonText}>BACK</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.modalConnectButton} onPress={handleConnectCamera} disabled={isLoading}>
+                  {isLoading ? <ActivityIndicator color="#000" /> : (
+                    <><Ionicons name="play" size={18} color="#000" /><Text style={styles.modalConnectText}>CONNECT</Text></>
+                  )}
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
+          </ScrollView>
         </View>
       </Modal>
 
@@ -1272,14 +1337,21 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.85)",
     justifyContent: "center",
-    padding: 22,
+    padding: 16,
+  },
+  connectModalScroll: {
+    maxHeight: "92%",
+  },
+  connectModalScrollContent: {
+    flexGrow: 1,
+    justifyContent: "center",
   },
   modalBox: {
     backgroundColor: "#07110a",
     borderRadius: 16,
     borderWidth: 1,
     borderColor: "rgba(16,185,82,0.5)",
-    padding: 20,
+    padding: 16,
   },
   modalHeader: {
     flexDirection: "row",
@@ -1301,24 +1373,56 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(16,185,82,0.35)",
     borderRadius: 10,
-    padding: 13,
+    padding: 11,
     color: "#fff",
     backgroundColor: "#020503",
-    marginBottom: 16,
+    marginBottom: 12,
   },
 
-  modeRow: { flexDirection: "row", gap: 8, marginBottom: 16 },
+  modeRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
   modeButton: {
     flex: 1,
     borderWidth: 1,
     borderColor: "rgba(16,185,82,0.35)",
     borderRadius: 10,
-    paddingVertical: 12,
+    paddingVertical: 9,
     alignItems: "center",
   },
   activeModeButton: { backgroundColor: NEON_GREEN, borderColor: NEON_GREEN },
   modeText: { color: NEON_GREEN, marginTop: 6, fontSize: 10, fontWeight: "900" },
   activeModeText: { color: "#000" },
+
+  demoGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 8,
+  },
+  demoOption: {
+    width: "31.8%",
+    minHeight: 54,
+    borderWidth: 1,
+    borderColor: "rgba(16,185,82,0.35)",
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#020503",
+    padding: 8,
+  },
+  demoSelected: {
+    backgroundColor: NEON_GREEN,
+    borderColor: NEON_GREEN,
+  },
+  demoText: {
+    color: NEON_GREEN,
+    marginTop: 4,
+    fontSize: 10,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  demoTextSelected: {
+    color: "#000",
+  },
 
   credentialsRow: { flexDirection: "row" },
   modalButtonRow: { flexDirection: "row", gap: 12, marginTop: 5 },

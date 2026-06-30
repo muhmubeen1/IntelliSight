@@ -18,7 +18,7 @@ class I3DService:
         with open(self.classes_path, "r") as f:
             class_to_idx = json.load(f)
 
-        self.idx_to_class = {v: k for k, v in class_to_idx.items()}
+        self.idx_to_class = {int(v): k for k, v in class_to_idx.items()}
         self.num_classes = len(class_to_idx)
 
         self.model = torch.hub.load(
@@ -41,25 +41,30 @@ class I3DService:
         print("[INFO] True I3D Model Loaded")
 
     def predict_frames(self, rgb_frames):
-        if len(rgb_frames) < 32:
-            return {
-                "label": "Unknown",
-                "confidence": 0.0
-            }
+        if len(rgb_frames) == 0:
+            return {"label": "Unknown", "confidence": 0.0}
 
         frames = []
 
         for frame in rgb_frames[:32]:
-            frame = frame / 255.0
+            frame = cv2.resize(frame, (224, 224))
+            frame = frame.astype(np.float32) / 255.0
             frames.append(frame)
+
+        while len(frames) < 32:
+            frames.append(frames[-1])
 
         frames = np.array(frames, dtype=np.float32)
 
         # T,H,W,C -> C,T,H,W
         frames = np.transpose(frames, (3, 0, 1, 2))
 
+        # C,T,H,W -> B,C,T,H,W
         frames = torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
         frames = frames.to(self.device)
+
+        print("[I3D] Tensor shape:", tuple(frames.shape))
+        print("[I3D] Min:", float(frames.min()), "Max:", float(frames.max()))
 
         with torch.no_grad():
             outputs = self.model(frames)
@@ -74,35 +79,28 @@ class I3DService:
         }
 
     def predict_video(self, video_path: str, max_frames: int = 32):
-        """Extract frames from video path and predict."""
-        import cv2
-        
         frames = []
         cap = cv2.VideoCapture(video_path)
+
         if not cap.isOpened():
             print(f"[I3D] Cannot open video: {video_path}")
             return {"label": "Unknown", "confidence": 0.0}
-        
-        frame_count = 0
+
         while len(frames) < max_frames:
             ret, frame = cap.read()
             if not ret:
                 break
+
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # Normalize to 0-1 range for I3D
-            frame_normalized = frame_rgb / 255.0
-            frames.append(frame_normalized)
-            frame_count += 1
-        
+
+            # Do not normalize here
+            frames.append(frame_rgb)
+
         cap.release()
-        
+
         print(f"[I3D] Extracted {len(frames)} frames from {video_path}")
-        
+
         if len(frames) == 0:
             return {"label": "Unknown", "confidence": 0.0}
-        
-        # Pad with last frame if needed
-        while len(frames) < 32:
-            frames.append(frames[-1])
-        
+
         return self.predict_frames(frames)

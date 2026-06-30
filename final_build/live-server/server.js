@@ -41,6 +41,15 @@ const HLS_OUTPUT = path.join(HLS_DIR, "index.m3u8");
 // Demo video path
 const LOCAL_VIDEO_PATH = path.join(__dirname, "videos", "test.mp4");
 
+// Demo class video paths
+const DEMO_VIDEO_PATHS = {
+    normal: path.join(__dirname, "videos", "demos", "normal.mp4"),
+    fighting: path.join(__dirname, "videos", "demos", "fighting.mp4"),
+    shooting: path.join(__dirname, "videos", "demos", "shooting.mp4"),
+    roadaccident: path.join(__dirname, "videos", "demos", "roadaccident.mp4"),
+    burglary: path.join(__dirname, "videos", "demos", "burglary.mp4"),
+};
+
 // Ensure HLS folder exists
 if (!fs.existsSync(HLS_DIR)) {
     fs.mkdirSync(HLS_DIR, { recursive: true });
@@ -115,11 +124,6 @@ function buildRtspUrl(ip, username = "admin", password = "", channel = 1) {
 // FLASK NOTIFICATION HELPERS
 // =============================================================================
 
-/**
- * Notify Flask to start its background AI analysis thread.
- * Called after FFmpeg has started and HLS segments are being written.
- * Fire-and-forget — stream continues even if Flask is temporarily unreachable.
- */
 function notifyFlaskStart() {
     const options = {
         hostname: "127.0.0.1",
@@ -134,17 +138,12 @@ function notifyFlaskStart() {
     });
 
     req.on("error", (err) => {
-        // Non-fatal: Flask might not be up yet; background thread will retry HLS on its own
         console.warn("[FLASK] Could not notify start:", err.message);
     });
 
     req.end();
 }
 
-/**
- * Notify Flask to stop its background AI analysis thread.
- * Called when the stream disconnects.
- */
 function notifyFlaskStop() {
     const options = {
         hostname: "127.0.0.1",
@@ -170,7 +169,6 @@ function notifyFlaskStop() {
 // =============================================================================
 
 function stopFFmpeg() {
-    // Notify Flask to stop AI analysis before killing FFmpeg
     if (isStreaming) {
         notifyFlaskStop();
     }
@@ -180,14 +178,13 @@ function stopFFmpeg() {
         const pid = ffmpegProcess.pid;
         ffmpegProcess.kill("SIGTERM");
 
-        // Force kill if still alive after 3 seconds
         setTimeout(() => {
             try {
                 process.kill(pid, 0);
                 logWithTimestamp("WARN", `[FFmpeg] PID ${pid} still alive — forcing SIGKILL`);
                 process.kill(pid, "SIGKILL");
             } catch (e) {
-                // Already exited — no action needed
+                // Already exited
             }
         }, 3000);
 
@@ -207,15 +204,22 @@ function startFFmpeg(mode, cameraUrl = "", cameraName = "Camera") {
     currentCameraName = cameraName;
     streamStartTime = new Date().toISOString();
 
-    // ── Build FFmpeg input arguments based on mode ────────────────────────────
     let inputArgs = [];
 
     if (mode === "local") {
-        if (!fs.existsSync(LOCAL_VIDEO_PATH)) {
-            throw new Error(`Demo video not found at: ${LOCAL_VIDEO_PATH}`);
+        const demoType = cameraUrl || "normal";
+        const selectedVideoPath = DEMO_VIDEO_PATHS[demoType] || LOCAL_VIDEO_PATH;
+
+        if (!fs.existsSync(selectedVideoPath)) {
+            throw new Error(`Demo video not found at: ${selectedVideoPath}`);
         }
-        logWithTimestamp("INFO", "[FFmpeg] Mode: local", { path: LOCAL_VIDEO_PATH });
-        inputArgs = ["-re", "-stream_loop", "-1", "-i", LOCAL_VIDEO_PATH];
+
+        logWithTimestamp("INFO", "[FFmpeg] Mode: local demo", {
+            demoType,
+            path: selectedVideoPath,
+        });
+
+        inputArgs = ["-re", "-stream_loop", "-1", "-i", selectedVideoPath];
 
     } else if (mode === "mobile-cam") {
         if (!cameraUrl) throw new Error("Mobile camera URL is required.");
@@ -231,11 +235,10 @@ function startFFmpeg(mode, cameraUrl = "", cameraName = "Camera") {
         throw new Error(`Unknown mode: "${mode}"`);
     }
 
-    // ── FFmpeg HLS output arguments ───────────────────────────────────────────
     const ffmpegArgs = [
         "-loglevel", "warning",
         ...inputArgs,
-        "-an",                              // no audio
+        "-an",
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
@@ -271,13 +274,9 @@ function startFFmpeg(mode, cameraUrl = "", cameraName = "Camera") {
         isStreaming = false;
         ffmpegProcess = null;
         broadcastStatus();
-        // Notify Flask that stream ended (in case it wasn't a manual disconnect)
         notifyFlaskStop();
     });
 
-    // ── Notify Flask to begin AI analysis ────────────────────────────────────
-    // Small delay to let FFmpeg write the first HLS segment before Flask
-    // tries to open the stream with OpenCV
     setTimeout(() => {
         notifyFlaskStart();
     }, 4000);
@@ -323,21 +322,18 @@ const server = http.createServer(async (request, response) => {
     const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
     const pathname = parsedUrl.pathname;
 
-    // ── CORS preflight ────────────────────────────────────────────────────────
     if (request.method === "OPTIONS") {
         response.writeHead(204, corsHeaders);
         response.end();
         return;
     }
 
-    // ── Health check ──────────────────────────────────────────────────────────
     if (pathname === "/" && request.method === "GET") {
         response.writeHead(200, { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" });
         response.end("IntelliSight Live Server Running ✓");
         return;
     }
 
-    // ── Stream status ─────────────────────────────────────────────────────────
     if (pathname === "/status" && request.method === "GET") {
         sendJson(response, 200, {
             isStreaming,
@@ -349,7 +345,6 @@ const server = http.createServer(async (request, response) => {
         return;
     }
 
-    // ── CONNECT: Start FFmpeg + notify Flask ──────────────────────────────────
     if (pathname === "/connect" && request.method === "POST") {
         try {
             const body = await parseBody(request);
@@ -360,7 +355,10 @@ const server = http.createServer(async (request, response) => {
 
             let cameraUrl = "";
 
-            if (mode === "mobile-cam") {
+            if (mode === "local") {
+                cameraUrl = body.demoType || "normal";
+
+            } else if (mode === "mobile-cam") {
                 cameraUrl = body.streamUrl || body.url || "";
                 if (!cameraUrl) throw new Error('mobile-cam mode requires "streamUrl"');
 
@@ -379,11 +377,10 @@ const server = http.createServer(async (request, response) => {
                     throw new Error('ip-camera mode requires "streamUrl" or "ip"');
                 }
 
-            } else if (mode !== "local") {
+            } else {
                 throw new Error(`Unknown mode: "${mode}"`);
             }
 
-            // Start FFmpeg — Flask notification is inside startFFmpeg (delayed 4s)
             startFFmpeg(mode, cameraUrl, cameraName);
 
             sendJson(response, 200, {
@@ -401,7 +398,6 @@ const server = http.createServer(async (request, response) => {
         return;
     }
 
-    // ── DISCONNECT: Stop FFmpeg + notify Flask ────────────────────────────────
     if (pathname === "/disconnect" && request.method === "POST") {
         stopFFmpeg();
         cleanHlsFolder();
@@ -410,7 +406,6 @@ const server = http.createServer(async (request, response) => {
         return;
     }
 
-    // ── Serve HLS files (m3u8 playlist + ts segments) ─────────────────────────
     const fileHeaders = { ...corsHeaders };
 
     if (pathname.endsWith(".m3u8")) {
@@ -424,7 +419,6 @@ const server = http.createServer(async (request, response) => {
     const requestedFile = pathname.replace(/^\/+/, "");
     const filePath = path.join(HLS_DIR, requestedFile);
 
-    // Prevent path traversal
     if (!filePath.startsWith(HLS_DIR)) {
         response.writeHead(403, corsHeaders);
         response.end("Forbidden");
@@ -452,7 +446,6 @@ wss.on("connection", (ws) => {
     logWithTimestamp("INFO", "[WS] New client connected");
     clients.add(ws);
 
-    // Send current state immediately on connect
     ws.send(JSON.stringify({
         type: "status",
         isStreaming,

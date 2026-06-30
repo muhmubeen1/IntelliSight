@@ -156,8 +156,8 @@ latest_live_classification: Dict[str, Any] = {
 
 # Live stream temporal state (for smoothing)
 live_stream_temporal_state = {
-    "recent_labels": deque(maxlen=10),
-    "recent_confidences": deque(maxlen=10),
+    "recent_labels": deque(maxlen=5),
+    "recent_confidences": deque(maxlen=5),
     "smoothed_confidence": 0.0,
     "stable_label": "Normal",
     "alert_cooldowns": {},
@@ -180,22 +180,18 @@ last_broadcast_timestamp: Optional[str] = None
 MIN_SEGMENTS_REQUIRED = 2
 
 # How often (seconds) the background thread runs a new analysis clip
-ANALYSIS_INTERVAL_SECONDS = 5
-
-# Frames captured per analysis cycle
+ANALYSIS_INTERVAL_SECONDS = 2
 FRAMES_TO_SAMPLE = 32
 
-# Temporal smoothing parameters
-STABILITY_WINDOW_SIZE = 10
-EMA_ALPHA = 0.3
+STABILITY_WINDOW_SIZE = 5
+EMA_ALPHA = 0.7
 ALERT_COOLDOWN_SECONDS = 15
-CONFIDENCE_THRESHOLD = 0.65
+CONFIDENCE_THRESHOLD = 0.75
 STABILITY_THRESHOLD = 0.6
 
-# Adaptive interval bounds
 MIN_INTERVAL = 2
 MAX_INTERVAL = 10
-NORMAL_INTERVAL = 8
+NORMAL_INTERVAL = 5
 
 
 def get_latest_ts_segments(count: int = 3) -> List[str]:
@@ -392,14 +388,17 @@ def run_background_analysis():
 
             frames_np = np.array(frames, dtype=np.uint8)
 
-            vit_result    = predict_video_from_frames(frames_np, max_frames=16)
-            i3d_result    = i3d_service.predict_frames(frames_np)
-            fusion_result = fusion_service.fuse_predictions(vit_result, i3d_result)
+            vit_result = predict_video_from_frames(frames_np, max_frames=16)
 
-            raw_label        = fusion_result["final_label"]
-            raw_confidence   = fusion_result["final_confidence"]
-            raw_alert_req    = fusion_result["alert_required"]
-            timestamp        = get_current_timestamp()
+            raw_label = vit_result.get("label", "NormalVideos")
+            raw_confidence = float(vit_result.get("confidence", 0.0))
+
+            raw_alert_req = (
+                raw_label != "NormalVideos"
+                and raw_confidence >= CONFIDENCE_THRESHOLD
+            )
+
+            timestamp = get_current_timestamp()
 
             state["recent_labels"].append(raw_label)
             state["recent_confidences"].append(raw_confidence)
@@ -433,7 +432,8 @@ def run_background_analysis():
             logger.info(
                 f"[BG-ANALYSIS] raw={raw_label}({raw_confidence:.2f}) | "
                 f"stable={stable_label} | smoothed_conf={final_confidence:.2f} | "
-                f"alert={alert_required} | consec_anomaly={state['consecutive_anomaly_count']}"
+                f"alert={alert_required} | consec_anomaly={state['consecutive_anomaly_count']} | "
+                f"source=vit_only_live"
             )
 
             with classification_lock:
@@ -645,6 +645,11 @@ def save_live_stream_detection(
     Returns plain IDs instead of a SQLAlchemy object to avoid detached-session errors.
     """
     try:
+        # Never save normal/uncertain live predictions as detections.
+        if anomaly_type in ("NormalVideos", "Normal", "Uncertain"):
+            logger.info(f"[LIVE-SESSION] Skipped normal live detection: {anomaly_type}")
+            return None
+
         stream_id = create_live_stream_session()
         if stream_id is None:
             return None
@@ -1265,6 +1270,7 @@ def get_live_classification_history() -> Tuple[Dict[str, Any], int]:
         detections = (
             db.session.query(LiveStreamDetection, LiveStreamSession)
             .join(LiveStreamSession, LiveStreamDetection.stream_id == LiveStreamSession.stream_id)
+            .filter(~LiveStreamDetection.anomaly_type.in_(["NormalVideos", "Normal", "Uncertain"]))
             .order_by(LiveStreamDetection.detected_at.desc())
             .limit(50)
             .all()
@@ -1352,6 +1358,7 @@ def get_live_session_detections(stream_id: int) -> Tuple[Dict[str, Any], int]:
         detections = (
             LiveStreamDetection.query
             .filter_by(stream_id=stream_id)
+            .filter(~LiveStreamDetection.anomaly_type.in_(["NormalVideos", "Normal", "Uncertain"]))
             .order_by(LiveStreamDetection.detected_at.asc())
             .all()
         )
@@ -1580,6 +1587,7 @@ def get_detections() -> Tuple[Dict[str, Any], int]:
             db.session.query(DetectionEvent, Video)
             .join(Video, DetectionEvent.video_id == Video.video_id)
             .filter(Video.user_id == user_id)
+            .filter(DetectionEvent.anomaly_type != "NormalVideos")
             .order_by(DetectionEvent.detected_at.desc())
             .all()
         )
