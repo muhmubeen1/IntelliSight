@@ -60,7 +60,7 @@ export default function ArchivesScreen({ navigation }: any) {
                 return;
             }
 
-            setArchives(data.data || []);
+            setArchives(data.data || data.archives || []);
         } catch (error) {
             console.log('Archive fetch error:', error);
             Alert.alert('Error', 'Unable to load archives.');

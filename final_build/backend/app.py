@@ -1484,54 +1484,10 @@ def get_alerts() -> Tuple[Dict[str, Any], int]:
             "message": "Failed to retrieve alerts"
         }), 500
 
-@app.route('/api/alerts/archived', methods=['GET'])
-@jwt_required()
-def get_archived_alerts() -> Tuple[Dict[str, Any], int]:
-    """Get archived/reviewed alerts for the authenticated user."""
-    try:
-        user_id = int(get_jwt_identity())
-
-        alerts = (
-            db.session.query(Alert, DetectionEvent, Video)
-            .join(DetectionEvent, Alert.event_id == DetectionEvent.event_id)
-            .outerjoin(Video, DetectionEvent.video_id == Video.video_id)
-            .filter(Video.user_id == user_id)
-            .filter(Alert.status.in_(["archived", "reviewed"]))
-            .order_by(Alert.created_at.desc())
-            .all()
-        )
-
-        result = []
-        for alert, event, video in alerts:
-            result.append({
-                "alert_id":     alert.alert_id,
-                "filename":     video.filename if video else "Live Stream",
-                "message":      alert.message,
-                "severity":     alert.severity,
-                "status":       alert.status,
-                "anomaly_type": event.anomaly_type,
-                "confidence":   event.confidence,
-                "created_at":   alert.created_at.isoformat() if alert.created_at else None
-            })
-
-        return jsonify({
-            "success": True,
-            "count":   len(result),
-            "data":    result
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Get archived alerts error: {str(e)}")
-        return jsonify({
-            "success": False,
-            "message": "Failed to retrieve archived alerts"
-        }), 500
-
-
-@app.route('/api/alerts/<int:alert_id>/review', methods=['PUT'])
+@app.route('/api/alerts/<int:alert_id>/review', methods=['PUT', 'POST'])
 @jwt_required()
 def review_alert(alert_id: int) -> Tuple[Dict[str, Any], int]:
-    """Mark an alert as reviewed."""
+    """Archive/review an alert."""
     try:
         user_id = int(get_jwt_identity())
 
@@ -1551,16 +1507,68 @@ def review_alert(alert_id: int) -> Tuple[Dict[str, Any], int]:
             }), 404
 
         alert, event, video = alert_data
-        alert.status = "reviewed"
+
+        already_archived = (
+            bool(alert.is_archived)
+            or str(alert.status).lower() in ("archived", "reviewed")
+        )
+
+        if already_archived:
+            return jsonify({
+                "success": True,
+                "message": "Alert already archived",
+                "alert_id": alert.alert_id,
+                "status": alert.status,
+                "is_archived": alert.is_archived
+            }), 200
+
+        alert.status = "archived"
+        alert.is_archived = True
+
+        from datetime import date
+        today = date.today()
+
+        archive = AlertArchive.query.filter_by(
+            user_id=user_id,
+            archive_date=today
+        ).first()
+
+        if not archive:
+            archive = AlertArchive(
+                user_id=user_id,
+                archive_date=today,
+                total_alerts=0,
+                high_count=0,
+                medium_count=0,
+                low_count=0,
+                stream_alerts=0,
+                manual_alerts=0,
+                pdf_path=None
+            )
+            db.session.add(archive)
+
+        severity = (alert.severity or "").lower()
+
+        archive.total_alerts = (archive.total_alerts or 0) + 1
+        archive.manual_alerts = (archive.manual_alerts or 0) + 1
+
+        if severity == "high":
+            archive.high_count = (archive.high_count or 0) + 1
+        elif severity == "medium":
+            archive.medium_count = (archive.medium_count or 0) + 1
+        else:
+            archive.low_count = (archive.low_count or 0) + 1
+
         db.session.commit()
 
-        logger.info(f"Alert {alert_id} reviewed by user {user_id}")
+        logger.info(f"Alert {alert_id} archived by user {user_id}")
 
         return jsonify({
-            "success":  True,
-            "message":  "Alert reviewed successfully",
+            "success": True,
+            "message": "Alert archived successfully",
             "alert_id": alert.alert_id,
-            "status":   alert.status
+            "status": alert.status,
+            "is_archived": alert.is_archived
         }), 200
 
     except Exception as e:
@@ -1570,7 +1578,6 @@ def review_alert(alert_id: int) -> Tuple[Dict[str, Any], int]:
             "success": False,
             "message": "Failed to review alert"
         }), 500
-
 
 # =============================================================================
 # DETECTION ENDPOINTS
@@ -1624,8 +1631,16 @@ def get_detections() -> Tuple[Dict[str, Any], int]:
 @app.route('/api/alerts/archive-today', methods=['POST'])
 @jwt_required()
 def archive_today_alerts():
+    """
+    Archive the currently active logs shown on the Alerts screen.
+
+    Important:
+    - Do not return 404 when there are no active logs; the frontend treats 404 as failure.
+    - Do not use strict func.date(...) filtering here, because DB timestamps may be UTC
+      while the UI/user day is local, which caused visible alerts to be missed.
+    - Keep archive summaries grouped by today's date in AlertArchive for ArchivesScreen.
+    """
     try:
-        from sqlalchemy import or_, func
         from datetime import date
 
         user_id = int(get_jwt_identity())
@@ -1635,27 +1650,19 @@ def archive_today_alerts():
             db.session.query(Alert, DetectionEvent, Video)
             .join(DetectionEvent, Alert.event_id == DetectionEvent.event_id)
             .outerjoin(Video, DetectionEvent.video_id == Video.video_id)
-            .filter(func.date(Alert.created_at) == today)
+            .filter(Video.user_id == user_id)
             .filter(Alert.status.in_(["New", "active", "unread"]))
             .filter(Alert.is_archived == False)
-            .filter(Video.user_id == user_id)
             .order_by(Alert.created_at.desc())
             .all()
         )
 
         live_sessions = (
             LiveStreamSession.query
-            .filter(func.date(LiveStreamSession.started_at) == today)
             .filter(LiveStreamSession.is_archived == False)
             .order_by(LiveStreamSession.started_at.desc())
             .all()
         )
-
-        if not alerts and not live_sessions:
-            return jsonify({
-                "success": False,
-                "message": "No active alerts found for today"
-            }), 404
 
         stream_count = 0
         manual_count = 0
@@ -1676,23 +1683,27 @@ def archive_today_alerts():
             else:
                 low_count += 1
 
-            if video:
-                manual_count += 1
-            else:
-                stream_count += 1
+            manual_count += 1
 
-        # Archive live stream sessions as one stream log, while counting every child detection.
         for stream_session in live_sessions:
             stream_session.is_archived = True
+
             if stream_session.status == "active":
                 stream_session.status = "completed"
                 stream_session.ended_at = datetime.now(timezone.utc)
 
-            detections = LiveStreamDetection.query.filter_by(stream_id=stream_session.stream_id).all()
+            detections = (
+                LiveStreamDetection.query
+                .filter_by(stream_id=stream_session.stream_id)
+                .filter(~LiveStreamDetection.anomaly_type.in_(["NormalVideos", "Normal", "Uncertain"]))
+                .all()
+            )
+
             stream_count += len(detections)
 
             for detection in detections:
                 severity = (detection.severity or "").lower()
+
                 if severity == "high":
                     high_count += 1
                 elif severity == "medium":
@@ -1700,34 +1711,55 @@ def archive_today_alerts():
                 else:
                     low_count += 1
 
-        archive = AlertArchive(
-            user_id=user_id,
-            archive_date=today,
-            total_alerts=len(alerts) + stream_count,
-            high_count=high_count,
-            medium_count=medium_count,
-            low_count=low_count,
-            stream_alerts=stream_count,
-            manual_alerts=manual_count,
-            pdf_path=None
-        )
+        archived_total = manual_count + stream_count
 
-        db.session.add(archive)
+        archive = AlertArchive.query.filter_by(
+            user_id=user_id,
+            archive_date=today
+        ).first()
+
+        if archived_total > 0:
+            if not archive:
+                archive = AlertArchive(
+                    user_id=user_id,
+                    archive_date=today,
+                    total_alerts=0,
+                    high_count=0,
+                    medium_count=0,
+                    low_count=0,
+                    stream_alerts=0,
+                    manual_alerts=0,
+                    pdf_path=None
+                )
+                db.session.add(archive)
+
+            archive.total_alerts = (archive.total_alerts or 0) + archived_total
+            archive.high_count = (archive.high_count or 0) + high_count
+            archive.medium_count = (archive.medium_count or 0) + medium_count
+            archive.low_count = (archive.low_count or 0) + low_count
+            archive.stream_alerts = (archive.stream_alerts or 0) + stream_count
+            archive.manual_alerts = (archive.manual_alerts or 0) + manual_count
+
         db.session.commit()
 
         return jsonify({
             "success": True,
-            "message": "Today logs archived successfully",
+            "message": (
+                "Today logs archived successfully"
+                if archived_total > 0
+                else "No active logs found to archive"
+            ),
+            "count": archived_total,
             "archive": {
-                "archive_id": archive.archive_id,
-                "archive_date": archive.archive_date.isoformat(),
-                "total_alerts": archive.total_alerts,
-                "high_count": archive.high_count,
-                "medium_count": archive.medium_count,
-                "low_count": archive.low_count,
-                "stream_alerts": archive.stream_alerts,
-                "manual_alerts": archive.manual_alerts,
-                "created_at": archive.created_at.isoformat() if archive.created_at else None
+                "archive_id": archive.archive_id if archive else None,
+                "archive_date": archive.archive_date.isoformat() if archive and archive.archive_date else today.isoformat(),
+                "total_alerts": archive.total_alerts if archive else 0,
+                "high_count": archive.high_count if archive else 0,
+                "medium_count": archive.medium_count if archive else 0,
+                "low_count": archive.low_count if archive else 0,
+                "stream_alerts": archive.stream_alerts if archive else 0,
+                "manual_alerts": archive.manual_alerts if archive else 0,
+                "created_at": archive.created_at.isoformat() if archive and archive.created_at else None
             }
         }), 200
 
@@ -1739,9 +1771,12 @@ def archive_today_alerts():
             "message": "Failed to archive today logs",
             "error": str(e)
         }), 500
+
+
 @app.route('/api/alerts/archives', methods=['GET'])
 @jwt_required()
-def get_alert_archives():
+def get_alert_archives() -> Tuple[Dict[str, Any], int]:
+    """Get daily archive summaries for the authenticated user."""
     try:
         user_id = int(get_jwt_identity())
 
@@ -1757,12 +1792,12 @@ def get_alert_archives():
             result.append({
                 "archive_id": archive.archive_id,
                 "archive_date": archive.archive_date.isoformat() if archive.archive_date else None,
-                "total_alerts": archive.total_alerts,
-                "high_count": archive.high_count,
-                "medium_count": archive.medium_count,
-                "low_count": archive.low_count,
-                "stream_alerts": archive.stream_alerts,
-                "manual_alerts": archive.manual_alerts,
+                "total_alerts": archive.total_alerts or 0,
+                "high_count": archive.high_count or 0,
+                "medium_count": archive.medium_count or 0,
+                "low_count": archive.low_count or 0,
+                "stream_alerts": archive.stream_alerts or 0,
+                "manual_alerts": archive.manual_alerts or 0,
                 "created_at": archive.created_at.isoformat() if archive.created_at else None
             })
 
@@ -1776,7 +1811,7 @@ def get_alert_archives():
         logger.error(f"Get alert archives error: {str(e)}")
         return jsonify({
             "success": False,
-            "message": "Failed to retrieve alert archives"
+            "message": "Failed to retrieve archives"
         }), 500
 
 @app.route('/api/reports/detections', methods=['GET'])
