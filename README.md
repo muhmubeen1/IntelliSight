@@ -683,7 +683,6 @@ Stores generated alerts.
 IntelliSight incorporates multiple security mechanisms:
 
 - JWT Authentication
-- Password Hashing
 - Protected REST APIs
 - Secure Database Storage
 - HTTPS Support (Cloud Deployment)
